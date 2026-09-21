@@ -73,3 +73,34 @@ Plugins/**/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+
+# ==========================================
+# 추가된 추천 항목 (IDE, OS 메타, 패키징 및 덤프)
+# ==========================================
+
+# JetBrains Rider 및 VS Code 등 기타 IDE 설정
+.vscode/
+.idea/
+*.rsuser
+*.user
+*.userprefs
+
+# 운영체제 생성 메타 파일 (맥/윈도우)
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 패키징된 빌드 결과물 폴더 (실수 커밋 방지용)
+Windows/
+WindowsNoEditor/
+Mac/
+MacNoEditor/
+Linux/
+LinuxNoEditor/
+Android/
+IOS/
+
+# 크래시 덤프 및 로그 파일
+*.dmp
+*.log
+*.bin

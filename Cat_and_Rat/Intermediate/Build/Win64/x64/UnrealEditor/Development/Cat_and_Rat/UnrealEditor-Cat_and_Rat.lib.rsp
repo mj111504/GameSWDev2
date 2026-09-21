@@ -1,0 +1,13 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/experimental:deterministic
+/DEF
+/NAME:"UnrealEditor-Cat_and_Rat.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"C:/Project/GameSWDev2/Cat_and_Rat/Intermediate/Build/Win64/x64/Cat_and_RatEditor/Development/UnrealEd/SharedPCH.UnrealEd.Project.ValApi.ValExpApi.Cpp20.h.obj"
+"C:/Project/GameSWDev2/Cat_and_Rat/Intermediate/Build/Win64/x64/UnrealEditor/Development/Cat_and_Rat/Cat_and_Rat.cpp.obj"
+"C:/Project/GameSWDev2/Cat_and_Rat/Intermediate/Build/Win64/x64/UnrealEditor/Development/Cat_and_Rat/PerModuleInline.gen.cpp.obj"
+/OUT:"C:/Project/GameSWDev2/Cat_and_Rat/Intermediate/Build/Win64/x64/UnrealEditor/Development/Cat_and_Rat/UnrealEditor-Cat_and_Rat.lib"

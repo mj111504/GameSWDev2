@@ -1,0 +1,14 @@
+{
+    "Version": "1.2",
+    "Data": {
+        "Source": "c:\\project\\gameswdev2\\cat_and_rat\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\cat_and_rat\\permoduleinline.gen.cpp",
+        "ProvidedModule": "",
+        "PCH": "c:\\project\\gameswdev2\\cat_and_rat\\intermediate\\build\\win64\\x64\\cat_and_rateditor\\development\\unrealed\\sharedpch.unrealed.project.valapi.valexpapi.cpp20.h.pch",
+        "Includes": [
+            "c:\\project\\gameswdev2\\cat_and_rat\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\cat_and_rat\\definitions.cat_and_rat.h",
+            "c:\\program files\\epic games\\ue_5.8\\engine\\source\\runtime\\core\\public\\hal\\permoduleinline.inl"
+        ],
+        "ImportedModules": [],
+        "ImportedHeaderUnits": []
+    }
+}
