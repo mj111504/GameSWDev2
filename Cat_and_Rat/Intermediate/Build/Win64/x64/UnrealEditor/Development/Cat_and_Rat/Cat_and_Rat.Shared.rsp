@@ -42,7 +42,7 @@
 /wd4267
 /wd4100
 /I "."
-/I "C:/Project/GameSWDev2/Cat_and_Rat/Source"
+/I "C:/Users/mj111/Desktop/Program_Files/GameSWDev2/Cat_and_Rat/Source"
 /I "Runtime/Core/Public"
 /I "Runtime/TraceLog/Public"
 /I "Runtime/AutoRTFM/Public"
@@ -336,7 +336,7 @@
 /I "../Plugins/EnhancedInput/Intermediate/Build/Win64/UnrealEditor/Inc/EnhancedInput/UHT"
 /I "../Plugins/EnhancedInput/Source"
 /I "../Plugins/EnhancedInput/Source/EnhancedInput/Public"
-/I "C:/Project/GameSWDev2/Cat_and_Rat/Intermediate/Build/Win64/x64/Cat_and_RatEditor/Development/UnrealEd"
+/I "C:/Users/mj111/Desktop/Program_Files/GameSWDev2/Cat_and_Rat/Intermediate/Build/Win64/x64/Cat_and_RatEditor/Development/UnrealEd"
 /external:W0
 /external:I "ThirdParty/GuidelinesSupportLibrary/GSL-1144/include"
 /external:I "ThirdParty/AtomicQueue"
@@ -344,7 +344,7 @@
 /external:I "ThirdParty/LibTiff/Source/Win64"
 /external:I "ThirdParty/LibTiff/Source"
 /external:I "ThirdParty/OpenGL"
-/external:I "C:/Program Files/Microsoft Visual Studio/18/Insiders/VC/Tools/MSVC/14.51.36231/INCLUDE"
+/external:I "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/INCLUDE"
 /external:I "C:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/ucrt"
 /external:I "C:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/shared"
 /external:I "C:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/um"
