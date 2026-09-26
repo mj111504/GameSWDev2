@@ -104,3 +104,6 @@ IOS/
 *.dmp
 *.log
 *.bin
+Intermediate/
+Saved/
+
