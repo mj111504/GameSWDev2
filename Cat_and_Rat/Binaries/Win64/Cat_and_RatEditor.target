@@ -4850,6 +4850,26 @@
 		{
 			"Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor.modules",
 			"Type": "RequiredResource"
+		},
+		{
+			"Path": "$(ProjectDir)/Plugins/VisualStudioTools/Binaries/Win64/UnrealEditor-VisualStudioBlueprintDebuggerHelper.dll",
+			"Type": "DynamicLibrary"
+		},
+		{
+			"Path": "$(ProjectDir)/Plugins/VisualStudioTools/Binaries/Win64/UnrealEditor-VisualStudioBlueprintDebuggerHelper.pdb",
+			"Type": "SymbolFile"
+		},
+		{
+			"Path": "$(ProjectDir)/Plugins/VisualStudioTools/Binaries/Win64/UnrealEditor-VisualStudioTools.dll",
+			"Type": "DynamicLibrary"
+		},
+		{
+			"Path": "$(ProjectDir)/Plugins/VisualStudioTools/Binaries/Win64/UnrealEditor-VisualStudioTools.pdb",
+			"Type": "SymbolFile"
+		},
+		{
+			"Path": "$(ProjectDir)/Plugins/VisualStudioTools/Binaries/Win64/UnrealEditor.modules",
+			"Type": "RequiredResource"
 		}
 	],
 	"RuntimeDependencies": [
@@ -29716,6 +29736,10 @@
 		{
 			"Path": "$(ProjectDir)/Cat_and_Rat.uproject",
 			"Type": "UFS"
+		},
+		{
+			"Path": "$(ProjectDir)/Plugins/VisualStudioTools/VisualStudioTools.uplugin",
+			"Type": "UFS"
 		}
 	],
 	"BuildPlugins": [
@@ -29952,6 +29976,7 @@
 		"VariantManagerContent",
 		"VisualStudioCodeSourceCodeAccess",
 		"VisualStudioSourceCodeAccess",
+		"VisualStudioTools",
 		"Water",
 		"WaveTable",
 		"WebMMedia",
