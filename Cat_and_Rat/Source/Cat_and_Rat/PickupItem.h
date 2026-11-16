@@ -32,6 +32,9 @@ class CAT_AND_RAT_API APickupItem : public AActor
 public:
     APickupItem();
 
+    virtual void NotifyActorBeginCursorOver() override;
+    virtual void NotifyActorEndCursorOver() override;
+
     // 에디터에서 설정할 아이템 정보
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item Stats")
     FItemData ItemInfo;
