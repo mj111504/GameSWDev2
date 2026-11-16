@@ -11,15 +11,20 @@ struct FItemData
     GENERATED_BODY()
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item Stats")
-    float Weight;
+    FString ItemName;//아이템 이름
+
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item Stats")
+    float mass;//아이템 질량(무게) 
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item Stats")
-    int32 Score;
+    int32 Weight;//아이템 가중치
 
     FItemData()
     {
-        Weight = 1.0f;
-        Score = 10;
+		ItemName = "Default Item";
+        mass = 1.0f;
+        Weight = 1;
     }
 };
 

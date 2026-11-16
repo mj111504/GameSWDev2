@@ -23,7 +23,7 @@ void APickupItem::NotifyActorBeginCursorOver()
     // 테스트용: UI 위젯 대신 화면 좌상단에 녹색 텍스트로 데이터 정보 출력 (3초간 유지)
     if (GEngine)
     {
-        UE_LOG(LogTemp, Warning, TEXT("[데이터 연결 테스트] 큐브 무게: %.1f / 점수: %d"), ItemInfo.Weight, ItemInfo.Score);
+        UE_LOG(LogTemp, Warning, TEXT("[데이터 연결 테스트] 큐브 무게: %.1f / 점수: %d"), ItemInfo.mass, ItemInfo.Weight);
     }
 }
 

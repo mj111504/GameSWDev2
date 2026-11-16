@@ -1,16 +1,27 @@
 #include "InteractionComponent.h"
 #include "PickupItem.h"
-#include "GameFramework/Pawn.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "DrawDebugHelpers.h"
 
 UInteractionComponent::UInteractionComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
+    BaseWalkSpeed = 600.0f;
 }
 
 void UInteractionComponent::BeginPlay()
 {
     Super::BeginPlay();
+
+    if (ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner()))
+    {
+        if (UCharacterMovementComponent* MovementComp = OwnerCharacter->GetCharacterMovement())
+        {
+            BaseWalkSpeed = MovementComp->MaxWalkSpeed;
+        }
+    }
 }
 
 void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -21,15 +32,12 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 void UInteractionComponent::TraceForward()
 {
-    // 1. 이 컴포넌트를 달고 있는 액터(BP_Rat)를 폰으로 가져옵니다.
     APawn* OwnerPawn = Cast<APawn>(GetOwner());
     if (!OwnerPawn) return;
 
-    // 2. 폰을 조종하는 플레이어 컨트롤러를 가져옵니다.
     APlayerController* PC = Cast<APlayerController>(OwnerPawn->GetController());
     if (!PC) return;
 
-    // 3. 카메라 시점 가져오기
     FVector StartLoc;
     FRotator StartRot;
     PC->GetPlayerViewPoint(StartLoc, StartRot);
@@ -38,12 +46,9 @@ void UInteractionComponent::TraceForward()
 
     FHitResult HitResult;
     FCollisionQueryParams CollisionParams;
-    CollisionParams.AddIgnoredActor(OwnerPawn); // 자기 자신(BP_Rat 몸통) 무시
+    CollisionParams.AddIgnoredActor(OwnerPawn);
 
     bool bHit = GetWorld()->LineTraceSingleByChannel(HitResult, StartLoc, EndLoc, ECC_Visibility, CollisionParams);
-
-    // 테스트용 빨간 레이저
-    //DrawDebugLine(GetWorld(), StartLoc, EndLoc, FColor::Red, false, 0.1f, 0, 2.0f);
 
     if (bHit)
     {
@@ -51,7 +56,6 @@ void UInteractionComponent::TraceForward()
         if (HitItem && FocusedItem != HitItem)
         {
             FocusedItem = HitItem;
-            UE_LOG(LogTemp, Warning, TEXT("[컴포넌트 감지] 무게: %.1f / 점수: %d"), FocusedItem->ItemInfo.Weight, FocusedItem->ItemInfo.Score);
         }
         else if (!HitItem)
         {
@@ -61,5 +65,61 @@ void UInteractionComponent::TraceForward()
     else
     {
         FocusedItem = nullptr;
+    }
+}
+
+void UInteractionComponent::PickupItem(APickupItem* ItemToPickup)
+{
+    if (HeldItem == nullptr && ItemToPickup != nullptr)
+    {
+        ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner());
+        if (!OwnerCharacter) return;
+
+        HeldItem = ItemToPickup;
+
+        UPrimitiveComponent* ItemRoot = Cast<UPrimitiveComponent>(HeldItem->GetRootComponent());
+        if (ItemRoot)
+        {
+            ItemRoot->SetSimulatePhysics(false);
+            ItemRoot->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        }
+
+        HeldItem->AttachToComponent(OwnerCharacter->GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, FName("HandSocket"));
+
+        if (UCharacterMovementComponent* MovementComp = OwnerCharacter->GetCharacterMovement())
+        {
+            // 오류 수정: HeldItem->ItemInfo.Weight -> HeldItem->ItemInfo.mass
+            // 속도 패널티는 아이템의 '질량(무게)'인 mass를 기준으로 계산해야 합니다.
+            float SpeedPenalty = HeldItem->ItemInfo.mass * 10.0f;
+            MovementComp->MaxWalkSpeed = FMath::Max(50.0f, BaseWalkSpeed - SpeedPenalty);
+        }
+    }
+}
+
+void UInteractionComponent::PlaceItem()
+{
+    if (HeldItem != nullptr)
+    {
+        ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner());
+
+        // 참고: PickupItem.h 구조체에 Score 변수가 없으므로, 문맥상 가중치(Weight)를 점수 대신 전송합니다.
+        OnItemPlacedProperly.Broadcast(HeldItem->ItemInfo.Weight);
+        HeldItem->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+
+        UPrimitiveComponent* ItemRoot = Cast<UPrimitiveComponent>(HeldItem->GetRootComponent());
+        if (ItemRoot)
+        {
+            ItemRoot->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+        }
+
+        if (OwnerCharacter)
+        {
+            if (UCharacterMovementComponent* MovementComp = OwnerCharacter->GetCharacterMovement())
+            {
+                MovementComp->MaxWalkSpeed = BaseWalkSpeed;
+            }
+        }
+
+        HeldItem = nullptr;
     }
 }
