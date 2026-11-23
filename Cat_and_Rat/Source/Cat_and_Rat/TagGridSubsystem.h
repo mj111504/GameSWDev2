@@ -50,6 +50,13 @@ public:
 	// BFS: Start에서 모든 칸까지의 칸 수 거리. 못 가는 칸은 -1
 	void BFS(int32 Start, TArray<int32>& OutDist) const;
 
+	// 여러 출발점 BFS: 각 칸에서 Starts 중 가장 가까운 칸까지의 칸 수. 못 가는 칸은 -1
+	// 고양이가 여러 마리일 때 "가장 가까운 고양이까지 거리"를 BFS 한 번으로 구하려고 씀
+	void BFSMulti(const TArray<int32>& Starts, TArray<int32>& OutDist) const;
+
+	// Pos가 있는 칸. 그 칸을 걸을 수 없으면 주변 2칸 안에서 가장 가까운 걸을 수 있는 칸. 없으면 INDEX_NONE
+	int32 FindNearestWalkableCell(const FVector& Pos) const;
+
 	// 다익스트라(힙): 기본 비용 + ExtraCost(위험도 비용). ExtraCost가 비어 있으면 기본 비용만 씀
 	// 못 가는 칸은 TNumericLimits<float>::Max()
 	void Dijkstra(int32 Start, const TArray<float>& ExtraCost, TArray<float>& OutDist) const;

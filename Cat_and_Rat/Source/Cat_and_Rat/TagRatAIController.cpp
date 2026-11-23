@@ -1,9 +1,8 @@
 ﻿#include "TagRatAIController.h"
-#include "TagCatAIController.h"
+#include "TagAgentSubsystem.h"
 #include "TagGridSubsystem.h"
 
 #include "NavigationSystem.h"
-#include "EngineUtils.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "DrawDebugHelpers.h"
@@ -15,7 +14,7 @@
 static TAutoConsoleVariable<int32> CVarRatMode(
 	TEXT("Tag.RatMode"), 0, TEXT("Rat flee mode. 0 = BFS safe cell, 1 = simple run away"));
 static TAutoConsoleVariable<float> CVarRatSpeed(
-	TEXT("Tag.RatSpeed"), 0.f, TEXT("Rat max walk speed (cm/s). 0 = keep the character's own value"));
+	TEXT("Tag.RatSpeed"), 0.f, TEXT("Rat max walk speed (cm/s) for every rat. 0 = keep the character's own value"));
 static TAutoConsoleVariable<float> CVarRatOpenBonus(
 	TEXT("Tag.RatOpenBonus"), 3.f, TEXT("Score bonus per walkable neighbor (in cells) so the rat avoids corners"));
 
@@ -23,58 +22,41 @@ void ATagRatAIController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
 	bCaught = false;
+	if (UTagAgentSubsystem* Agents = GetWorld()->GetSubsystem<UTagAgentSubsystem>())
+	{
+		Agents->RegisterRat(InPawn);
+	}
 	GetWorld()->GetTimerManager().SetTimer(ThinkHandle, this, &ATagRatAIController::Think, 0.25f, true, 0.1f);
+}
+
+void ATagRatAIController::OnUnPossess()
+{
+	if (UTagAgentSubsystem* Agents = GetWorld()->GetSubsystem<UTagAgentSubsystem>())
+	{
+		Agents->UnregisterRat(GetPawn());
+	}
+	GetWorld()->GetTimerManager().ClearTimer(ThinkHandle);
+	Super::OnUnPossess();
 }
 
 void ATagRatAIController::OnCaught()
 {
+	// 잡힌 쥐: 멈추고, 화면에서 숨기고, 충돌을 꺼서 다른 캐릭터를 막지 않게 함
 	bCaught = true;
 	StopMovement();
 	GetWorld()->GetTimerManager().ClearTimer(ThinkHandle);
-}
-
-APawn* ATagRatAIController::FindCat()
-{
-	if (Cat.IsValid()) return Cat.Get();
-	for (TActorIterator<APawn> It(GetWorld()); It; ++It)
+	if (APawn* Me = GetPawn())
 	{
-		if (It->GetController() && It->GetController()->IsA<ATagCatAIController>())
-		{
-			Cat = *It;
-			return *It;
-		}
+		Me->SetActorHiddenInGame(true);
+		Me->SetActorEnableCollision(false);
 	}
-	return nullptr;
-}
-
-// 캐릭터가 벽 가까이 있으면 그 칸의 중심이 NavMesh 밖이라 걸을 수 없는 칸으로 잡힐 수 있음.
-// 그럴 때 주변 2칸 안에서 가장 가까운 걸을 수 있는 칸을 찾음
-int32 ATagRatAIController::FindNearestWalkableCell(const UTagGridSubsystem* Grid, const FVector& Pos) const
-{
-	const int32 Center = Grid->WorldToCell(Pos);
-	if (Grid->IsWalkable(Center)) return Center;
-
-	const float Cs = Grid->GetCellSize();
-	int32 Best = INDEX_NONE;
-	float BestD2 = TNumericLimits<float>::Max();
-	for (int32 Dy = -2; Dy <= 2; ++Dy)
-	{
-		for (int32 Dx = -2; Dx <= 2; ++Dx)
-		{
-			const int32 C = Grid->WorldToCell(Pos + FVector(Dx * Cs, Dy * Cs, 0.f));
-			if (!Grid->IsWalkable(C)) continue;
-			const float D2 = FVector::DistSquared2D(Grid->CellToWorld(C), Pos);
-			if (D2 < BestD2) { BestD2 = D2; Best = C; }
-		}
-	}
-	return Best;
 }
 
 void ATagRatAIController::Think()
 {
 	APawn* Me = GetPawn();
-	APawn* Enemy = FindCat();
-	if (!Me || !Enemy || bCaught) return;
+	UTagAgentSubsystem* Agents = GetWorld()->GetSubsystem<UTagAgentSubsystem>();
+	if (!Me || !Agents || bCaught) return;
 
 	if (ACharacter* Ch = Cast<ACharacter>(Me))
 	{
@@ -82,15 +64,26 @@ void ATagRatAIController::Think()
 		if (Speed > 0.f) Ch->GetCharacterMovement()->MaxWalkSpeed = Speed;
 	}
 
-	const FVector MyPos = Me->GetActorLocation();
-	const FVector CatPos = Enemy->GetActorLocation();
-	const bool bDebug = IConsoleManager::Get().FindConsoleVariable(TEXT("Tag.Debug"))
-		? IConsoleManager::Get().FindConsoleVariable(TEXT("Tag.Debug"))->GetInt() != 0 : true;
+	TArray<APawn*> Cats;
+	Agents->GetCats(Cats);
+	if (Cats.Num() == 0) return;
 
-	// ---------- 방식 1: 단순 도주 ----------
+	const FVector MyPos = Me->GetActorLocation();
+	IConsoleVariable* DebugVar = IConsoleManager::Get().FindConsoleVariable(TEXT("Tag.Debug"));
+	const bool bDebug = DebugVar ? DebugVar->GetInt() != 0 : true;
+
+	// ---------- 방식 1: 단순 도주 (가장 가까운 고양이 반대 방향) ----------
 	if (CVarRatMode.GetValueOnGameThread() == 1)
 	{
-		const FVector Away = (MyPos - CatPos).GetSafeNormal2D();
+		APawn* Nearest = nullptr;
+		float BestD2 = TNumericLimits<float>::Max();
+		for (APawn* Cat : Cats)
+		{
+			const float D2 = FVector::DistSquared2D(MyPos, Cat->GetActorLocation());
+			if (D2 < BestD2) { BestD2 = D2; Nearest = Cat; }
+		}
+
+		const FVector Away = (MyPos - Nearest->GetActorLocation()).GetSafeNormal2D();
 		FVector Goal = MyPos + Away * 800.f;
 
 		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
@@ -108,16 +101,25 @@ void ATagRatAIController::Think()
 	UTagGridSubsystem* Grid = GetWorld()->GetSubsystem<UTagGridSubsystem>();
 	if (!Grid || Grid->GetNumWalkable() == 0) return;
 
-	const int32 MyCell = FindNearestWalkableCell(Grid, MyPos);
-	const int32 CatCell = FindNearestWalkableCell(Grid, CatPos);
-	if (MyCell == INDEX_NONE || CatCell == INDEX_NONE) return;
+	const int32 MyCell = Grid->FindNearestWalkableCell(MyPos);
+	if (MyCell == INDEX_NONE) return;
 
-	Grid->BFS(MyCell, RatDist);
-	Grid->BFS(CatCell, CatDist);
+	// 고양이 칸 모으기 + 가장 빠른 고양이 속도 (가장 위험한 경우 기준으로 안전하게 판단)
+	CatCells.Reset();
+	float CatSpeed = 1.f;
+	for (APawn* Cat : Cats)
+	{
+		const int32 C = Grid->FindNearestWalkableCell(Cat->GetActorLocation());
+		if (C != INDEX_NONE) CatCells.Add(C);
+		CatSpeed = FMath::Max(CatSpeed, Cat->GetMovementComponent()->GetMaxSpeed());
+	}
+	if (CatCells.Num() == 0) return;
+
+	Grid->BFS(MyCell, RatDist);         // 쥐에서 각 칸까지
+	Grid->BFSMulti(CatCells, CatDist);  // 가장 가까운 고양이에서 각 칸까지
 
 	const float Cs = Grid->GetCellSize();
 	const float MySpeed = FMath::Max(1.f, Me->GetMovementComponent()->GetMaxSpeed());
-	const float CatSpeed = FMath::Max(1.f, Enemy->GetMovementComponent()->GetMaxSpeed());
 	const float OpenBonus = CVarRatOpenBonus.GetValueOnGameThread();
 
 	int32 Best = INDEX_NONE;
@@ -130,7 +132,7 @@ void ATagRatAIController::Think()
 		if (RatDist[C] < 0 || CatDist[C] < 0) continue;
 
 		const float MyTime = RatDist[C] * Cs / MySpeed;   // 쥐가 그 칸까지 걸리는 시간(초)
-		const float CatTime = CatDist[C] * Cs / CatSpeed; // 고양이가 그 칸까지 걸리는 시간(초)
+		const float CatTime = CatDist[C] * Cs / CatSpeed; // 가장 가까운 고양이가 그 칸까지 걸리는 시간(초)
 		const float Margin = CatTime - MyTime;
 
 		if (Margin > 0.f)

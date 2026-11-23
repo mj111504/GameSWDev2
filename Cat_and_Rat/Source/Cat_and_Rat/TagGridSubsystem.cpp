@@ -164,6 +164,62 @@ void UTagGridSubsystem::BFS(int32 Start, TArray<int32>& OutDist) const
 	}
 }
 
+void UTagGridSubsystem::BFSMulti(const TArray<int32>& Starts, TArray<int32>& OutDist) const
+{
+	// 출발점 여러 개를 처음부터 큐에 거리 0으로 넣고 BFS를 한 번 돌림.
+	// 결과 = 각 칸에서 "가장 가까운 출발점"까지의 칸 수. 출발점이 몇 개든 O(n)
+	const int32 N = Walkable.Num();
+	OutDist.Init(-1, N);
+
+	TArray<int32> Queue;
+	Queue.Reserve(N);
+	for (int32 S : Starts)
+	{
+		if (IsWalkable(S) && OutDist[S] < 0)
+		{
+			OutDist[S] = 0;
+			Queue.Add(S);
+		}
+	}
+
+	int32 Nb[4];
+	for (int32 Head = 0; Head < Queue.Num(); ++Head)
+	{
+		const int32 Cur = Queue[Head];
+		const int32 Count = GetNeighborsFixed(Cur, Nb);
+		for (int32 i = 0; i < Count; ++i)
+		{
+			if (OutDist[Nb[i]] < 0)
+			{
+				OutDist[Nb[i]] = OutDist[Cur] + 1;
+				Queue.Add(Nb[i]);
+			}
+		}
+	}
+}
+
+int32 UTagGridSubsystem::FindNearestWalkableCell(const FVector& Pos) const
+{
+	// 캐릭터가 벽 가까이 있으면 그 칸 중심이 NavMesh 밖이라 걸을 수 없는 칸으로 잡힐 수 있음.
+	// 그럴 때 주변 2칸 안에서 가장 가까운 걸을 수 있는 칸을 씀
+	const int32 Center = WorldToCell(Pos);
+	if (IsWalkable(Center)) return Center;
+
+	int32 Best = INDEX_NONE;
+	float BestD2 = TNumericLimits<float>::Max();
+	for (int32 Dy = -2; Dy <= 2; ++Dy)
+	{
+		for (int32 Dx = -2; Dx <= 2; ++Dx)
+		{
+			const int32 C = WorldToCell(Pos + FVector(Dx * CellSize, Dy * CellSize, 0.f));
+			if (!IsWalkable(C)) continue;
+			const float D2 = FVector::DistSquared2D(CellToWorld(C), Pos);
+			if (D2 < BestD2) { BestD2 = D2; Best = C; }
+		}
+	}
+	return Best;
+}
+
 namespace
 {
 	struct FDijkstraNode
