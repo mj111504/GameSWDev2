@@ -159,7 +159,11 @@ void ATagCatAIController::Tick(float DeltaSeconds)
 		{
 			if (ATagRatAIController* RatAI = Cast<ATagRatAIController>(Rat->GetController()))
 			{
-				RatAI->OnCaught();
+				RatAI->OnCaught();             // AI 쥐: 멈추고 사라짐
+			}
+			else
+			{
+				Agents->HandlePlayerCaught(Rat); // 플레이어 쥐: 조작을 막고 멈춤
 			}
 			if (CurrentTarget.Get() == Rat)
 			{

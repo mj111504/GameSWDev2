@@ -9,6 +9,8 @@
  * - 고양이 N마리, 쥐 M마리가 있어도 돌아가게, 누가 있는지를 한곳에서 관리함
  * - 각 AI 컨트롤러가 캐릭터를 조종하기 시작할 때 자기를 등록함
  * - 잡힌 쥐는 "살아 있는 쥐" 명단에서 빠짐. 마지막 쥐가 잡히면 총 시간을 출력함
+ * - 플레이어가 조종하는 캐릭터는 AI 컨트롤러가 없어서 스스로 등록하지 못함.
+ *   그래서 0.5초마다 플레이어 캐릭터를 확인해서 쥐 명단에 넣음 (콘솔 변수 Tag.PlayerIsRat, 기본 1)
  */
 UCLASS()
 class CAT_AND_RAT_API UTagAgentSubsystem : public UWorldSubsystem
@@ -32,10 +34,17 @@ public:
 
 	float GetElapsedSeconds() const;
 
+	// 잡힌 쥐가 플레이어 캐릭터일 때: 조작을 막고 멈춤
+	void HandlePlayerCaught(APawn* Rat);
+
 protected:
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 
 private:
+	void RegisterPlayers();      // 0.5초마다 플레이어 캐릭터를 쥐로 등록
+
+	FTimerHandle PlayerScanHandle;
+	TArray<TWeakObjectPtr<APawn>> CaughtRats;   // 한 번 잡힌 쥐는 다시 등록하지 않음
 	TArray<TWeakObjectPtr<APawn>> Cats;
 	TArray<TWeakObjectPtr<APawn>> AliveRats;
 	int32 NumRatsTotal = 0;

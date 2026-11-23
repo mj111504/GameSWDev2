@@ -3,6 +3,14 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "TimerManager.h"
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<int32> CVarPlayerIsRat(
+	TEXT("Tag.PlayerIsRat"), 1, TEXT("1 = the player-controlled character joins as a rat, 0 = it is ignored by the cats"));
 
 bool UTagAgentSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
@@ -13,6 +21,35 @@ void UTagAgentSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
 	StartTime = InWorld.GetTimeSeconds();
+	RegisterPlayers();
+	InWorld.GetTimerManager().SetTimer(PlayerScanHandle,
+		FTimerDelegate::CreateUObject(this, &UTagAgentSubsystem::RegisterPlayers), 0.5f, true);
+}
+
+void UTagAgentSubsystem::RegisterPlayers()
+{
+	if (CVarPlayerIsRat.GetValueOnGameThread() == 0) return;
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		APawn* P = PC ? PC->GetPawn() : nullptr;
+		if (!P || CaughtRats.Contains(P) || Cats.Contains(P)) continue;
+		RegisterRat(P);   // 이미 있으면 아무 일도 안 함
+	}
+}
+
+void UTagAgentSubsystem::HandlePlayerCaught(APawn* Rat)
+{
+	APlayerController* PC = Rat ? Cast<APlayerController>(Rat->GetController()) : nullptr;
+	if (!PC) return;
+
+	PC->SetIgnoreMoveInput(true);
+	if (ACharacter* Ch = Cast<ACharacter>(Rat))
+	{
+		Ch->GetCharacterMovement()->StopMovementImmediately();
+	}
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 10.f, FColor::Red, TEXT("[TagAI] You were caught!"));
 }
 
 float UTagAgentSubsystem::GetElapsedSeconds() const
@@ -76,6 +113,7 @@ bool UTagAgentSubsystem::ReportCaught(APawn* Cat, APawn* Rat)
 	if (!Rat || !IsRatAlive(Rat)) return false;
 
 	AliveRats.Remove(Rat);
+	CaughtRats.Add(Rat);
 	++NumCaught;
 
 	const float Elapsed = GetElapsedSeconds();
