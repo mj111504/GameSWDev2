@@ -57,6 +57,9 @@ protected:
     // 가중치(1, 3, 6, 10)에 따른 쥐 이동속도 배율 계산
     float GetSpeedMultiplierByWeight(int32 Weight) const;
 
+    UPROPERTY()
+    USceneComponent* HoldPointComp = nullptr;
+
 public:
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
@@ -76,7 +79,7 @@ public:
     float ThrowImpulse = 600.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interaction|Config")
-    FName HandSocketName = FName("HandSocket");
+    FName HoldPointName = FName("HoldPoint");
 
     // --- [상태 변수] UI 및 블루프린트 참조용 ---
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Interaction|State")
