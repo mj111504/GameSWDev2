@@ -11,6 +11,7 @@
  *   예: 1층 바닥 위에 2층 바닥이 겹친 곳 = 칸 2개
  * - 칸 = 정점. 상하좌우 기둥의 칸 중 높이 차이가 MaxStepZ 이하이고,
  *   NavMesh 위에서 직선으로 막힘없이 이어지면 간선으로 연결
+ *   (높이가 다른 두 칸은 직선 검사가 실패해도 NavMesh 실제 길이 짧으면 연결)
  *   → 계단·경사로는 한 칸씩 조금씩 높아지므로 자동으로 층끼리 연결됨
  * - NavMesh에서 자동 생성 (하드코딩 없음)
  * - 술래 AI와 쥐 AI가 이 객체 하나를 같이 씀
@@ -25,7 +26,7 @@ public:
 
 	// NavMesh를 검사해서 격자를 (다시) 만든다
 	UFUNCTION(BlueprintCallable, Category = "TagGrid")
-	void BuildGrid(float InCellSize = 150.f);
+	void BuildGrid(float InCellSize = 35.f);
 
 	// 좌표 → 칸. 그 위치 기둥의 칸 중 높이가 가장 가까운 칸. 없으면 INDEX_NONE(-1)
 	UFUNCTION(BlueprintPure, Category = "TagGrid")
@@ -80,7 +81,7 @@ private:
 	// 상하좌우 이웃을 고정 배열에 담고 개수를 돌려줌 (BFS 안에서 메모리 할당 안 하려고)
 	int32 GetNeighborsFixed(int32 Cell, int32 OutNb[4]) const;
 
-	float CellSize = 150.f;
+	float CellSize = 35.f;    // 실제 시작 값은 콘솔 변수 Tag.CellSize (기본 35)
 	float MaxStepZ = 120.f;   // 옆 칸과 이 높이 차이까지는 이어진 바닥(계단·경사로)으로 봄. 층 사이 높이보다 작아야 함
 	FVector Origin = FVector::ZeroVector; // 격자 왼쪽 아래 모서리 (X, Y 최솟값)
 	int32 NumX = 0;
