@@ -20,6 +20,17 @@ void UInteractionComponent::BeginPlay()
         {
             BaseWalkSpeed = MovementComp->MaxWalkSpeed;
         }
+        // 캐릭터 블루프린트에서 "HoldPoint"라는 이름의 SceneComponent 자동 탐색
+        TArray<USceneComponent*> SceneComps;
+        OwnerCharacter->GetComponents<USceneComponent>(SceneComps);
+        for (USceneComponent* Comp : SceneComps)
+        {
+            if (Comp && Comp->GetFName() == HoldPointName)
+            {
+                HoldPointComp = Comp;
+                break;
+            }
+        }
     }
 
     // AI 등 트레이스가 필요 없는 경우 Tick 자체를 꺼서 성능 절약
@@ -107,12 +118,6 @@ bool UInteractionComponent::PickupItem(APickupItem* ItemToPickup)
 
     const int32 ItemWeight = ItemToPickup->ItemInfo.Weight;
 
-    // 기획서 규칙: 쥐는 초대형(가중치 10 이상) 물건을 들 수 없음 (고양이는 가능)
-    if (!bIsCat && ItemWeight >= 10)
-    {
-        return false;
-    }
-
     HeldItem = ItemToPickup;
 
     if (UPrimitiveComponent* ItemRoot = Cast<UPrimitiveComponent>(HeldItem->GetRootComponent()))
@@ -121,11 +126,24 @@ bool UInteractionComponent::PickupItem(APickupItem* ItemToPickup)
         ItemRoot->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     }
 
-    HeldItem->AttachToComponent(
-        OwnerCharacter->GetMesh(),
-        FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-        HandSocketName
-    );
+    if (HoldPointComp)
+    {
+        // 블루프린트에 배치한 HoldPoint 위치에 정확히 부착
+        HeldItem->AttachToComponent(
+            HoldPointComp,
+            FAttachmentTransformRules::SnapToTargetNotIncludingScale
+        );
+    }
+    else
+    {
+        // HoldPoint를 못 찾았을 때의 안전장치 (오타나 누락 확인용 경고 출력)
+        UE_LOG(LogTemp, Warning, TEXT("[InteractionComponent] '%s' 컴포넌트를 찾을 수 없어 캐릭터 정면에 임시 부착합니다."), *HoldPointName.ToString());
+        HeldItem->AttachToComponent(
+            OwnerCharacter->GetRootComponent(),
+            FAttachmentTransformRules::SnapToTargetNotIncludingScale
+        );
+        HeldItem->SetActorRelativeLocation(FVector(100.0f, 0.0f, 30.0f));
+    }
 
     // 쥐에게만 크기별 이동속도 페널티 적용 (고양이는 항상 100%)
     if (!bIsCat)

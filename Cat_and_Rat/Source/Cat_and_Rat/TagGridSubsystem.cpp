@@ -1,12 +1,17 @@
 ﻿#include "TagGridSubsystem.h"
 
 #include "NavigationSystem.h"
+#include "NavigationPath.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
 #include "HAL/IConsoleManager.h"
+
+// 게임 시작 때 쓸 칸 크기. 한 번 바꾸면 에디터를 끌 때까지 유지됨 (예: Tag.CellSize 50)
+static TAutoConsoleVariable<float> CVarTagCellSize(
+	TEXT("Tag.CellSize"), 35.f, TEXT("Grid cell size (cm) used when play starts. Default 35"));
 
 bool UTagGridSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
@@ -17,7 +22,7 @@ void UTagGridSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
 	RetryCount = 0;
-	BuildGrid(CellSize);
+	BuildGrid(CVarTagCellSize.GetValueOnGameThread());
 }
 
 void UTagGridSubsystem::BuildGrid(float InCellSize)
@@ -97,8 +102,11 @@ void UTagGridSubsystem::BuildGrid(float InCellSize)
 	// 2) 간선 만들기: 상하좌우 기둥에서 높이 차이가 MaxStepZ 이하인 칸 중 가장 가까운 높이의 칸.
 	//    그리고 NavMesh 위에서 두 점 사이를 직선으로 쏴서 막히지 않을 때만 연결
 	//    (얇은 벽을 사이에 둔 두 칸이 연결되는 것을 막음)
+	//    단, 계단·경사로처럼 높이가 다른 두 칸은 직선 검사가 실패할 수 있어서,
+	//    그때는 NavMesh에 실제 길을 물어보고 짧은 길(직선 거리의 2배 이하)이 있으면 연결
 	Neighbors.Init(INDEX_NONE, N * 4);
 	NumLinks = 0;
+	int32 NumPathLinks = 0;   // 직선 검사는 실패했지만 실제 길로 연결된 수 (계단 등)
 	const int32 DX[4] = { -1, 1, 0, 0 };
 	const int32 DY[4] = { 0, 0, -1, 1 };
 
@@ -125,7 +133,18 @@ void UTagGridSubsystem::BuildGrid(float InCellSize)
 			if (Best == INDEX_NONE) continue;
 
 			FVector HitLocation;
-			const bool bBlocked = UNavigationSystemV1::NavigationRaycast(World, NodePos[Node], NodePos[Best], HitLocation);
+			bool bBlocked = UNavigationSystemV1::NavigationRaycast(World, NodePos[Node], NodePos[Best], HitLocation);
+
+			if (bBlocked && FMath::Abs(NodePos[Best].Z - NodePos[Node].Z) > 5.f)
+			{
+				const float Straight = FVector::Dist(NodePos[Node], NodePos[Best]);
+				UNavigationPath* Path = UNavigationSystemV1::FindPathToLocationSynchronously(World, NodePos[Node], NodePos[Best]);
+				if (Path && Path->IsValid() && !Path->IsPartial() && Path->GetPathLength() <= Straight * 2.f + 50.f)
+				{
+					bBlocked = false;
+					++NumPathLinks;
+				}
+			}
 			if (bBlocked) continue;
 
 			Neighbors[Node * 4 + D] = Best;
@@ -133,8 +152,8 @@ void UTagGridSubsystem::BuildGrid(float InCellSize)
 		}
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[TagGrid] Built %d x %d columns, %d cells, %d links, max %d floors in one column, cell size %.0f"),
-		NumX, NumY, N, NumLinks, MaxFloorsInColumn, CellSize);
+	UE_LOG(LogTemp, Log, TEXT("[TagGrid] Built %d x %d columns, %d cells, %d links (%d by nav path), max %d floors in one column, cell size %.0f"),
+		NumX, NumY, N, NumLinks, NumPathLinks, MaxFloorsInColumn, CellSize);
 
 	// 게임 시작 직후 NavMesh가 아직 준비 안 됐을 수 있어서, 0칸이면 0.5초 뒤 다시 시도 (최대 10번)
 	if (N == 0 && RetryCount < 10)
@@ -393,7 +412,8 @@ void UTagGridSubsystem::DrawDistances(const TArray<int32>& Dist, float Duration)
 
 // ---------------------------------------------------------------------------
 // 콘솔 명령 (게임 실행 중 ` 키로 콘솔을 열고 입력)
-//   Tag.Build 150   : 칸 크기 150으로 격자 다시 만들기
+//   Tag.Build 100   : 지금 바로 칸 크기 100으로 격자 다시 만들기 (이번 실행에만 적용)
+//   Tag.CellSize 50 : 다음 Play/Simulate부터 칸 크기 50으로 시작 (기본 35, 에디터를 끌 때까지 유지)
 //   Tag.DrawGrid    : 걸을 수 있는 칸(초록 네모)과 층이 바뀌는 연결(노란 선)을 10초 동안 표시
 //   Tag.DrawBFS     : 플레이어(Play 중) 위치에서 BFS 거리를 색으로 10초 동안 표시 + 계산 시간 출력
 // ---------------------------------------------------------------------------
