@@ -1,9 +1,9 @@
 ﻿#include "TagCatAIController.h"
 #include "TagRatAIController.h"
+#include "TagAgentSubsystem.h"
+#include "TagGridSubsystem.h"
 
 #include "NavigationSystem.h"
-#include "EngineUtils.h"
-#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "DrawDebugHelpers.h"
@@ -16,9 +16,9 @@ static TAutoConsoleVariable<int32> CVarCatVersion(
 static TAutoConsoleVariable<float> CVarCatPredict(
 	TEXT("Tag.CatPredictSeconds"), 1.0f, TEXT("Cat version 2: how many seconds ahead to predict"));
 static TAutoConsoleVariable<float> CVarCatSpeed(
-	TEXT("Tag.CatSpeed"), 0.f, TEXT("Cat max walk speed (cm/s). 0 = keep the character's own value"));
+	TEXT("Tag.CatSpeed"), 0.f, TEXT("Cat max walk speed (cm/s) for every cat. 0 = keep the character's own value"));
 static TAutoConsoleVariable<float> CVarCatchDistance(
-	TEXT("Tag.CatchDistance"), 150.f, TEXT("Distance (cm) at which the cat catches the rat"));
+	TEXT("Tag.CatchDistance"), 150.f, TEXT("Distance (cm) at which a cat catches a rat"));
 static TAutoConsoleVariable<int32> CVarTagDebug(
 	TEXT("Tag.Debug"), 1, TEXT("Draw AI targets. 1 = on, 0 = off"));
 
@@ -30,30 +30,61 @@ ATagCatAIController::ATagCatAIController()
 void ATagCatAIController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
-	bCaught = false;
-	StartTime = GetWorld()->GetTimeSeconds();
+	if (UTagAgentSubsystem* Agents = GetWorld()->GetSubsystem<UTagAgentSubsystem>())
+	{
+		Agents->RegisterCat(InPawn);
+	}
 	GetWorld()->GetTimerManager().SetTimer(ThinkHandle, this, &ATagCatAIController::Think, 0.25f, true, 0.1f);
 }
 
-APawn* ATagCatAIController::FindRat()
+void ATagCatAIController::OnUnPossess()
 {
-	if (Rat.IsValid()) return Rat.Get();
-	for (TActorIterator<APawn> It(GetWorld()); It; ++It)
+	if (UTagAgentSubsystem* Agents = GetWorld()->GetSubsystem<UTagAgentSubsystem>())
 	{
-		if (It->GetController() && It->GetController()->IsA<ATagRatAIController>())
+		Agents->UnregisterCat(GetPawn());
+	}
+	GetWorld()->GetTimerManager().ClearTimer(ThinkHandle);
+	Super::OnUnPossess();
+}
+
+APawn* ATagCatAIController::ChooseTarget(const TArray<APawn*>& Rats)
+{
+	APawn* Me = GetPawn();
+	APawn* Best = nullptr;
+
+	// 1순위: 격자 BFS로 "걸어서" 가장 가까운 쥐. 벽 너머 쥐를 가깝다고 착각하지 않게
+	UTagGridSubsystem* Grid = GetWorld()->GetSubsystem<UTagGridSubsystem>();
+	const int32 MyCell = (Grid && Grid->GetNumWalkable() > 0) ? Grid->FindNearestWalkableCell(Me->GetActorLocation()) : INDEX_NONE;
+	if (MyCell != INDEX_NONE)
+	{
+		Grid->BFS(MyCell, MyDist);
+		int32 BestDist = MAX_int32;
+		for (APawn* Rat : Rats)
 		{
-			Rat = *It;
-			return *It;
+			const int32 RatCell = Grid->FindNearestWalkableCell(Rat->GetActorLocation());
+			if (RatCell == INDEX_NONE || MyDist[RatCell] < 0) continue;
+			if (MyDist[RatCell] < BestDist) { BestDist = MyDist[RatCell]; Best = Rat; }
 		}
 	}
-	return nullptr;
+
+	// 격자를 못 쓰면: 직선거리로 가장 가까운 쥐
+	if (!Best)
+	{
+		float BestD2 = TNumericLimits<float>::Max();
+		for (APawn* Rat : Rats)
+		{
+			const float D2 = FVector::DistSquared2D(Me->GetActorLocation(), Rat->GetActorLocation());
+			if (D2 < BestD2) { BestD2 = D2; Best = Rat; }
+		}
+	}
+	return Best;
 }
 
 void ATagCatAIController::Think()
 {
 	APawn* Me = GetPawn();
-	APawn* Target = FindRat();
-	if (!Me || !Target || bCaught) return;
+	UTagAgentSubsystem* Agents = GetWorld()->GetSubsystem<UTagAgentSubsystem>();
+	if (!Me || !Agents) return;
 
 	// 속도 덮어쓰기 (실험 조건 맞추기용)
 	if (ACharacter* Ch = Cast<ACharacter>(Me))
@@ -61,6 +92,19 @@ void ATagCatAIController::Think()
 		const float Speed = CVarCatSpeed.GetValueOnGameThread();
 		if (Speed > 0.f) Ch->GetCharacterMovement()->MaxWalkSpeed = Speed;
 	}
+
+	TArray<APawn*> Rats;
+	Agents->GetAliveRats(Rats);
+	if (Rats.Num() == 0)
+	{
+		StopMovement();
+		CurrentTarget = nullptr;
+		return;
+	}
+
+	APawn* Target = ChooseTarget(Rats);
+	CurrentTarget = Target;
+	if (!Target) return;
 
 	const int32 Version = CVarCatVersion.GetValueOnGameThread();
 	const FVector RatPos = Target->GetActorLocation();
@@ -71,7 +115,7 @@ void ATagCatAIController::Think()
 		// 예측식: 위치 + 속도 x 예측 시간
 		const FVector Predicted = RatPos + Target->GetVelocity() * CVarCatPredict.GetValueOnGameThread();
 
-		// 쥐가 아주 가까우면 예측하지 않고 바로 덮침 (예측 지점으로 가다가 지나치는 것 방지)
+		// 쥐가 3m 안이면 예측하지 않고 바로 덮침 (예측 지점으로 가다가 지나치는 것 방지)
 		const bool bVeryClose = FVector::Dist2D(Me->GetActorLocation(), RatPos) < 300.f;
 
 		// 예측 지점이 벽 안이나 경기장 밖이면 NavMesh 위로 끌어옴. 실패하면 현재 위치로 감
@@ -97,24 +141,35 @@ void ATagCatAIController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	// 잡았는지는 매 프레임 확인 (0.25초 간격이면 스쳐 지나갈 수 있어서)
+	// 잡기 판정은 매 프레임 (0.25초 간격이면 스쳐 지나가는 순간을 놓칠 수 있어서)
+	// 쫓는 쥐뿐 아니라, 옆을 지나가는 다른 쥐도 닿으면 잡음
 	APawn* Me = GetPawn();
-	APawn* Target = Rat.Get();
-	if (bCaught || !Me || !Target) return;
+	UTagAgentSubsystem* Agents = GetWorld()->GetSubsystem<UTagAgentSubsystem>();
+	if (!Me || !Agents) return;
 
-	if (FVector::Dist2D(Me->GetActorLocation(), Target->GetActorLocation()) <= CVarCatchDistance.GetValueOnGameThread())
+	TArray<APawn*> Rats;
+	Agents->GetAliveRats(Rats);
+	const float CatchDist = CVarCatchDistance.GetValueOnGameThread();
+
+	for (APawn* Rat : Rats)
 	{
-		bCaught = true;
-		const float Elapsed = GetWorld()->GetTimeSeconds() - StartTime;
-		StopMovement();
-		if (ATagRatAIController* RatAI = Cast<ATagRatAIController>(Target->GetController()))
-		{
-			RatAI->OnCaught();
-		}
+		if (FVector::Dist2D(Me->GetActorLocation(), Rat->GetActorLocation()) > CatchDist) continue;
 
-		const FString Msg = FString::Printf(TEXT("[TagAI] Caught! cat version %d, %.2f s"),
-			CVarCatVersion.GetValueOnGameThread(), Elapsed);
-		UE_LOG(LogTemp, Log, TEXT("%s"), *Msg);
-		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 10.f, FColor::Red, Msg);
+		if (Agents->ReportCaught(Me, Rat))
+		{
+			if (ATagRatAIController* RatAI = Cast<ATagRatAIController>(Rat->GetController()))
+			{
+				RatAI->OnCaught();             // AI 쥐: 멈추고 사라짐
+			}
+			else
+			{
+				Agents->HandlePlayerCaught(Rat); // 플레이어 쥐: 조작을 막고 멈춤
+			}
+			if (CurrentTarget.Get() == Rat)
+			{
+				CurrentTarget = nullptr;
+				StopMovement();   // 다음 Think에서 새 쥐를 고름
+			}
+		}
 	}
 }

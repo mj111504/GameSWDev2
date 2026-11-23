@@ -5,8 +5,13 @@
 #include "TagGridSubsystem.generated.h"
 
 /**
- * 술래잡기 격자 그래프
- * - 바닥을 CellSize 크기 칸으로 나눔. 걸을 수 있는 칸 = 정점, 상하좌우로 붙은 칸 = 간선
+ * 술래잡기 격자 그래프 (층 지원)
+ * - 바닥을 위에서 볼 때 CellSize 크기의 "기둥(column)"으로 나눔
+ * - 기둥 하나에 걸을 수 있는 바닥이 여러 층 있으면, 바닥 하나마다 칸 하나를 만듦
+ *   예: 1층 바닥 위에 2층 바닥이 겹친 곳 = 칸 2개
+ * - 칸 = 정점. 상하좌우 기둥의 칸 중 높이 차이가 MaxStepZ 이하이고,
+ *   NavMesh 위에서 직선으로 막힘없이 이어지면 간선으로 연결
+ *   → 계단·경사로는 한 칸씩 조금씩 높아지므로 자동으로 층끼리 연결됨
  * - NavMesh에서 자동 생성 (하드코딩 없음)
  * - 술래 AI와 쥐 AI가 이 객체 하나를 같이 씀
  */
@@ -22,22 +27,24 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "TagGrid")
 	void BuildGrid(float InCellSize = 150.f);
 
-	// 좌표 변환. 격자 밖이면 INDEX_NONE(-1)
+	// 좌표 → 칸. 그 위치 기둥의 칸 중 높이가 가장 가까운 칸. 없으면 INDEX_NONE(-1)
 	UFUNCTION(BlueprintPure, Category = "TagGrid")
 	int32 WorldToCell(const FVector& WorldPos) const;
 
+	// 칸 → 좌표 (NavMesh 위의 점)
 	UFUNCTION(BlueprintPure, Category = "TagGrid")
 	FVector CellToWorld(int32 Cell) const;
 
-	bool  IsValidCell(int32 Cell) const { return Cell >= 0 && Cell < Walkable.Num(); }
-	bool  IsWalkable(int32 Cell) const { return IsValidCell(Cell) && Walkable[Cell]; }
-	int32 GetNumCells() const { return Walkable.Num(); }
-	int32 GetNumWalkable() const { return NumWalkable; }
+	bool  IsValidCell(int32 Cell) const { return Cell >= 0 && Cell < NodePos.Num(); }
+	bool  IsWalkable(int32 Cell) const { return IsValidCell(Cell); }   // 칸은 전부 걸을 수 있는 바닥에만 만듦
+	int32 GetNumCells() const { return NodePos.Num(); }
+	int32 GetNumWalkable() const { return NodePos.Num(); }
+	int32 GetNumLinks() const { return NumLinks; }
 	int32 GetNumX() const { return NumX; }
 	int32 GetNumY() const { return NumY; }
 	float GetCellSize() const { return CellSize; }
 
-	// 상하좌우 중 걸을 수 있는 이웃 칸
+	// 상하좌우로 연결된 칸 (층이 바뀌는 계단·경사로 연결 포함)
 	void  GetNeighbors(int32 Cell, TArray<int32>& OutNeighbors) const;
 
 	// 쥐 도주 때 "열린 칸" 가산점용
@@ -49,6 +56,13 @@ public:
 
 	// BFS: Start에서 모든 칸까지의 칸 수 거리. 못 가는 칸은 -1
 	void BFS(int32 Start, TArray<int32>& OutDist) const;
+
+	// 여러 출발점 BFS: 각 칸에서 Starts 중 가장 가까운 칸까지의 칸 수. 못 가는 칸은 -1
+	// 고양이가 여러 마리일 때 "가장 가까운 고양이까지 거리"를 BFS 한 번으로 구하려고 씀
+	void BFSMulti(const TArray<int32>& Starts, TArray<int32>& OutDist) const;
+
+	// Pos가 있는 칸. 없으면 주변 2칸 안에서 가장 가까운 칸. 그래도 없으면 INDEX_NONE
+	int32 FindNearestWalkableCell(const FVector& Pos) const;
 
 	// 다익스트라(힙): 기본 비용 + ExtraCost(위험도 비용). ExtraCost가 비어 있으면 기본 비용만 씀
 	// 못 가는 칸은 TNumericLimits<float>::Max()
@@ -67,14 +81,21 @@ private:
 	int32 GetNeighborsFixed(int32 Cell, int32 OutNb[4]) const;
 
 	float CellSize = 150.f;
+	float MaxStepZ = 120.f;   // 옆 칸과 이 높이 차이까지는 이어진 바닥(계단·경사로)으로 봄. 층 사이 높이보다 작아야 함
 	FVector Origin = FVector::ZeroVector; // 격자 왼쪽 아래 모서리 (X, Y 최솟값)
 	int32 NumX = 0;
 	int32 NumY = 0;
-	int32 NumWalkable = 0;
+	int32 NumLinks = 0;
+	int32 MaxFloorsInColumn = 0;
 
-	TArray<bool>  Walkable;  // 칸 번호 = Y * NumX + X
-	TArray<float> BaseCost;
-	TArray<float> CellZ;     // NavMesh 위 실제 높이
+	// 칸 정보. 칸 번호 = 이 배열들의 위치
+	TArray<FVector> NodePos;     // NavMesh 위의 점
+	TArray<int32>   NodeColumn;  // 어느 기둥에 속하는지 (기둥 번호 = Y * NumX + X)
+	TArray<int32>   Neighbors;   // 칸마다 4개 (왼쪽, 오른쪽, 아래, 위). 없으면 -1
+	TArray<float>   BaseCost;
+
+	// 기둥 c에 속한 칸 = ColumnStart[c] ~ ColumnStart[c + 1] - 1 (높이 낮은 순)
+	TArray<int32>   ColumnStart;
 
 	FTimerHandle RetryHandle;
 	int32 RetryCount = 0;
