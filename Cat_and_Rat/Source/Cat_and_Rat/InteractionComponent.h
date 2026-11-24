@@ -36,6 +36,10 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ItemData")
     UStaticMesh* ItemMesh = nullptr;
+
+    // UI 아이콘용 텍스처 추가
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ItemData")
+    UTexture2D* ItemIcon = nullptr;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnItemStateChangedSignature, APickupItem*, TargetItem);
