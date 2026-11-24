@@ -1,4 +1,7 @@
 ﻿#include "TagAgentSubsystem.h"
+#include "TagGridSubsystem.h"
+#include "PickupItem.h"
+#include "InteractionComponent.h"
 
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -8,9 +11,18 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "TimerManager.h"
 #include "HAL/IConsoleManager.h"
+#include "EngineUtils.h"
+#include "DrawDebugHelpers.h"
+#include "Components/PrimitiveComponent.h"
 
 static TAutoConsoleVariable<int32> CVarPlayerIsRat(
 	TEXT("Tag.PlayerIsRat"), 1, TEXT("1 = the player-controlled character joins as a rat, 0 = it is ignored by the cats"));
+static TAutoConsoleVariable<float> CVarRecoverRadius(
+	TEXT("Tag.RecoverRadius"), 150.f, TEXT("An exported item counts as returned when it lies within this distance (cm) of its original location"));
+static TAutoConsoleVariable<float> CVarRecoverScoreRatio(
+	TEXT("Tag.RecoverScoreRatio"), 0.5f, TEXT("Cat score for returning an item = item score x this ratio"));
+static TAutoConsoleVariable<float> CVarMessWinPercent(
+	TEXT("Tag.MessWinPercent"), 80.f, TEXT("Rats win when messiness goes over this percent"));
 
 bool UTagAgentSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
@@ -24,6 +36,11 @@ void UTagAgentSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	RegisterPlayers();
 	InWorld.GetTimerManager().SetTimer(PlayerScanHandle,
 		FTimerDelegate::CreateUObject(this, &UTagAgentSubsystem::RegisterPlayers), 0.5f, true);
+
+	FindExportZones();
+	UpdateItems();
+	InWorld.GetTimerManager().SetTimer(ItemScanHandle,
+		FTimerDelegate::CreateUObject(this, &UTagAgentSubsystem::UpdateItems), 0.25f, true);
 }
 
 void UTagAgentSubsystem::RegisterPlayers()
@@ -44,6 +61,10 @@ void UTagAgentSubsystem::HandlePlayerCaught(APawn* Rat)
 	APlayerController* PC = Rat ? Cast<APlayerController>(Rat->GetController()) : nullptr;
 	if (!PC) return;
 
+	if (UInteractionComponent* Interact = Rat->FindComponentByClass<UInteractionComponent>())
+	{
+		Interact->DropItem(false);   // 잡히면 들고 있던 물건을 떨어뜨림
+	}
 	PC->SetIgnoreMoveInput(true);
 	if (ACharacter* Ch = Cast<ACharacter>(Rat))
 	{
@@ -114,6 +135,7 @@ bool UTagAgentSubsystem::ReportCaught(APawn* Cat, APawn* Rat)
 
 	AliveRats.Remove(Rat);
 	CaughtRats.Add(Rat);
+	ReleaseReservations(Rat);
 	++NumCaught;
 
 	const float Elapsed = GetElapsedSeconds();
@@ -129,4 +151,341 @@ bool UTagAgentSubsystem::ReportCaught(APawn* Cat, APawn* Rat)
 		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Yellow, Done);
 	}
 	return true;
+}
+
+// ======================== 물건 ========================
+
+int32 UTagAgentSubsystem::GetItemScore(int32 Weight)
+{
+	if (Weight >= 10) return 50;
+	if (Weight >= 6)  return 30;
+	if (Weight >= 3)  return 15;
+	return 5;
+}
+
+float UTagAgentSubsystem::GetCarrySpeedMultiplier(int32 Weight)
+{
+	if (Weight >= 10) return 0.30f;
+	if (Weight >= 6)  return 0.50f;
+	if (Weight >= 3)  return 0.75f;
+	return 1.00f;
+}
+
+void UTagAgentSubsystem::UpdateItems()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// 반출구역이 아직 없으면 2초마다 다시 찾아봄
+	if (ExportZones.Num() == 0 && (++ZoneScanCounter % 8) == 0)
+	{
+		FindExportZones();
+	}
+
+	IConsoleVariable* DebugVar = IConsoleManager::Get().FindConsoleVariable(TEXT("Tag.Debug"));
+	if (DebugVar && DebugVar->GetInt() != 0) DrawExportZones(0.3f);   // 반출구역 = 하늘색 상자
+
+	// 1) 새로 생긴 물건 추가
+	for (TActorIterator<APickupItem> It(World); It; ++It)
+	{
+		APickupItem* Item = *It;
+		const bool bKnown = Items.ContainsByPredicate([Item](const FTagItemEntry& E) { return E.Item.Get() == Item; });
+		if (!bKnown)
+		{
+			FTagItemEntry Entry;
+			Entry.Item = Item;
+			Items.Add(Entry);
+		}
+	}
+
+	// 2) 상태 갱신
+	for (int32 i = Items.Num() - 1; i >= 0; --i)
+	{
+		FTagItemEntry& E = Items[i];
+		APickupItem* Item = E.Item.Get();
+		if (!Item)
+		{
+			Items.RemoveAtSwap(i);   // 파괴된 물건
+			continue;
+		}
+
+		// 누가 들고 있나: 물건이 캐릭터에 붙어 있으면 그 캐릭터가 들고 있는 것
+		APawn* Holder = Cast<APawn>(Item->GetAttachParentActor());
+		E.Holder = Holder;
+		if (Holder) E.LastHolder = Holder;
+
+		// 원래 위치: 처음 바닥에 놓인 상태로 본 위치 (생성 직후 위치를 옮기는 경우를 피하려고 다음 갱신 때 기록)
+		if (!E.bHomeSet && !Holder)
+		{
+			E.Home = Item->GetActorLocation();
+			E.bHomeSet = true;
+		}
+
+		// 찜한 쥐가 잡혔거나 사라졌으면 찜 해제
+		if (E.ReservedBy.IsValid() && !IsRatAlive(E.ReservedBy.Get()))
+		{
+			E.ReservedBy = nullptr;
+		}
+
+		// 찜한 고양이가 사라졌으면 찜 해제
+		if (E.ReservedByCat.IsValid() && !Cats.Contains(E.ReservedByCat))
+		{
+			E.ReservedByCat = nullptr;
+		}
+
+		// 반출: 들고 있지 않은 물건이 반출구역 안에 있으면 완료
+		if (!E.bExported && !Holder && IsInExportZone(Item->GetActorLocation()))
+		{
+			ExportItem(E);
+		}
+		// 회수: 반출됐던 물건이 원래 위치 근처에 놓여 있으면 완료 (들고 있는 동안은 아님)
+		else if (E.bExported && !Holder && E.bHomeSet)
+		{
+			const FVector P = Item->GetActorLocation();
+			const float R = CVarRecoverRadius.GetValueOnGameThread();
+			if (FVector::Dist2D(P, E.Home) <= R && FMath::Abs(P.Z - E.Home.Z) <= 150.f)
+			{
+				RecoverItem(E);
+			}
+		}
+	}
+}
+
+void UTagAgentSubsystem::ExportItem(FTagItemEntry& Entry)
+{
+	APickupItem* Item = Entry.Item.Get();
+	if (!Item) return;
+
+	Entry.bExported = true;
+	Entry.ReservedBy = nullptr;
+
+	const int32 Weight = Item->ItemInfo.Weight;
+	const int32 Score = GetItemScore(Weight);
+	ExportedScore += Score;
+	MessWeight += Weight;
+
+	APawn* Rat = Entry.LastHolder.Get();
+	const FString Msg = FString::Printf(TEXT("[TagAI] %s exported %s (weight %d, +%d) at %.2f s. Total %d points, messiness %.1f%%"),
+		Rat ? *Rat->GetName() : TEXT("?"), *Item->ItemInfo.ItemName, Weight, Score, GetElapsedSeconds(),
+		ExportedScore, GetMessinessPercent());
+	UE_LOG(LogTemp, Log, TEXT("%s"), *Msg);
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Cyan, Msg);
+
+	OnItemExported.Broadcast(Item, Rat, Score);
+	OnMessinessChanged.Broadcast(GetMessinessPercent());
+	CheckRatsWin();
+}
+
+void UTagAgentSubsystem::RecoverItem(FTagItemEntry& Entry)
+{
+	APickupItem* Item = Entry.Item.Get();
+	if (!Item) return;
+
+	Entry.bExported = false;
+	Entry.ReservedByCat = nullptr;
+	Entry.ReservedBy = nullptr;
+
+	const int32 Weight = Item->ItemInfo.Weight;
+	const int32 Score = FMath::RoundToInt(GetItemScore(Weight) * CVarRecoverScoreRatio.GetValueOnGameThread());
+	RecoveredScore += Score;
+	MessWeight = FMath::Max(0, MessWeight - Weight);
+
+	APawn* Cat = Entry.LastHolder.Get();
+	const FString Msg = FString::Printf(TEXT("[TagAI] %s returned %s (weight %d, +%d) at %.2f s. Cat total %d points, messiness %.1f%%"),
+		Cat ? *Cat->GetName() : TEXT("?"), *Item->ItemInfo.ItemName, Weight, Score, GetElapsedSeconds(),
+		RecoveredScore, GetMessinessPercent());
+	UE_LOG(LogTemp, Log, TEXT("%s"), *Msg);
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Orange, Msg);
+
+	OnItemRecovered.Broadcast(Item, Cat, Score);
+	OnMessinessChanged.Broadcast(GetMessinessPercent());
+}
+
+void UTagAgentSubsystem::CheckRatsWin()
+{
+	if (bRatsWon) return;
+	const float Mess = GetMessinessPercent();
+	if (Mess > CVarMessWinPercent.GetValueOnGameThread())
+	{
+		bRatsWon = true;
+		const FString Msg = FString::Printf(TEXT("[TagAI] Rats win! Messiness %.1f%% at %.2f s"), Mess, GetElapsedSeconds());
+		UE_LOG(LogTemp, Log, TEXT("%s"), *Msg);
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Yellow, Msg);
+		OnRatsWin.Broadcast();
+	}
+}
+
+float UTagAgentSubsystem::GetMessinessPercent() const
+{
+	int32 TotalWeight = 0;
+	for (const FTagItemEntry& E : Items)
+	{
+		if (const APickupItem* Item = E.Item.Get()) TotalWeight += Item->ItemInfo.Weight;
+	}
+	return TotalWeight > 0 ? 100.f * MessWeight / TotalWeight : 0.f;
+}
+
+bool UTagAgentSubsystem::ReserveItem(APickupItem* Item, APawn* Rat)
+{
+	for (FTagItemEntry& E : Items)
+	{
+		if (E.Item.Get() != Item) continue;
+		APawn* Other = E.ReservedBy.Get();
+		if (Other && Other != Rat && IsRatAlive(Other)) return false;
+		E.ReservedBy = Rat;
+		return true;
+	}
+	return false;
+}
+
+void UTagAgentSubsystem::ReleaseReservations(APawn* Rat)
+{
+	for (FTagItemEntry& E : Items)
+	{
+		if (E.ReservedBy.Get() == Rat) E.ReservedBy = nullptr;
+	}
+}
+
+void UTagAgentSubsystem::TransferReservation(APickupItem* Item, APawn* NewRat)
+{
+	for (FTagItemEntry& E : Items)
+	{
+		if (E.Item.Get() == Item) { E.ReservedBy = NewRat; return; }
+	}
+}
+
+bool UTagAgentSubsystem::ReserveItemForCat(APickupItem* Item, APawn* Cat)
+{
+	for (FTagItemEntry& E : Items)
+	{
+		if (E.Item.Get() != Item) continue;
+		APawn* Other = E.ReservedByCat.Get();
+		if (Other && Other != Cat && Cats.Contains(Other)) return false;
+		E.ReservedByCat = Cat;
+		return true;
+	}
+	return false;
+}
+
+void UTagAgentSubsystem::ReleaseCatReservations(APawn* Cat)
+{
+	for (FTagItemEntry& E : Items)
+	{
+		if (E.ReservedByCat.Get() == Cat) E.ReservedByCat = nullptr;
+	}
+}
+
+int32 UTagAgentSubsystem::CountRecoveringCats(const APawn* Except) const
+{
+	TArray<const APawn*, TInlineAllocator<8>> Found;
+	for (const FTagItemEntry& E : Items)
+	{
+		const APawn* C = E.ReservedByCat.Get();
+		if (C && C != Except) Found.AddUnique(C);
+	}
+	return Found.Num();
+}
+
+const FTagItemEntry* UTagAgentSubsystem::FindEntry(const APickupItem* Item) const
+{
+	return Items.FindByPredicate([Item](const FTagItemEntry& E) { return E.Item.Get() == Item; });
+}
+
+// ======================== 반출구역 ========================
+
+void UTagAgentSubsystem::FindExportZones()
+{
+	ExportZones.Reset();
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		if (It->ActorHasTag(TEXT("ExportZone"))) ExportZones.Add(*It);
+	}
+	if (ExportZones.Num() > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[TagAI] Found %d export zones"), ExportZones.Num());
+	}
+}
+
+static FBox GetZoneBox(const AActor* Zone)
+{
+	// 충돌 컴포넌트(Trigger Box의 상자) 기준. 충돌이 없는 액터면 전체 모양 기준
+	FVector Center, Extent;
+	Zone->GetActorBounds(true, Center, Extent);
+	if (Extent.IsNearlyZero()) Zone->GetActorBounds(false, Center, Extent);
+	return FBox(Center - Extent, Center + Extent);
+}
+
+bool UTagAgentSubsystem::IsInExportZone(const FVector& Pos) const
+{
+	for (const TWeakObjectPtr<AActor>& Z : ExportZones)
+	{
+		if (const AActor* Zone = Z.Get())
+		{
+			if (GetZoneBox(Zone).ExpandBy(FVector(0.f, 0.f, 50.f)).IsInsideOrOn(Pos)) return true;
+		}
+	}
+	return false;
+}
+
+void UTagAgentSubsystem::DrawExportZones(float Duration) const
+{
+	for (const TWeakObjectPtr<AActor>& Z : ExportZones)
+	{
+		if (const AActor* Zone = Z.Get())
+		{
+			const FBox Box = GetZoneBox(Zone);
+			DrawDebugBox(GetWorld(), Box.GetCenter(), Box.GetExtent(), FColor::Cyan, false, Duration, 0, 3.f);
+		}
+	}
+}
+
+void UTagAgentSubsystem::EnsureExportMap(UTagGridSubsystem* Grid)
+{
+	if (!Grid) return;
+	if (ExportMapBuildCount == Grid->GetBuildCount() && ExportMapZoneCount == ExportZones.Num()) return;
+
+	ExportMapBuildCount = Grid->GetBuildCount();
+	ExportMapZoneCount = ExportZones.Num();
+	ExportCells.Reset();
+
+	for (const TWeakObjectPtr<AActor>& Z : ExportZones)
+	{
+		const AActor* Zone = Z.Get();
+		if (!Zone) continue;
+
+		// 칸은 바닥(NavMesh) 높이에 있으므로, 상자 아래쪽으로 1.5m 여유를 줌
+		FBox Box = GetZoneBox(Zone);
+		Box.Min.Z -= 150.f;
+
+		const int32 Before = ExportCells.Num();
+		for (int32 C = 0; C < Grid->GetNumCells(); ++C)
+		{
+			if (Box.IsInsideOrOn(Grid->CellToWorld(C))) ExportCells.Add(C);
+		}
+
+		// 상자 안에 칸이 하나도 없으면 (NavMesh 밖에 놓은 경우) 상자 바닥 가운데에서 가장 가까운 칸을 씀
+		if (ExportCells.Num() == Before)
+		{
+			const FVector Bottom(Box.GetCenter().X, Box.GetCenter().Y, Box.Min.Z + 150.f);
+			const int32 C = Grid->FindNearestWalkableCell(Bottom);
+			if (C != INDEX_NONE) ExportCells.Add(C);
+			UE_LOG(LogTemp, Warning, TEXT("[TagAI] Export zone %s has no grid cells inside. Using nearest cell %d"),
+				*Zone->GetName(), C);
+		}
+	}
+
+	Grid->BFSMulti(ExportCells, ExportDist);
+	UE_LOG(LogTemp, Log, TEXT("[TagAI] Export map: %d zones, %d cells inside zones"), ExportZones.Num(), ExportCells.Num());
+}
+
+const TArray<int32>& UTagAgentSubsystem::GetExportCells(UTagGridSubsystem* Grid)
+{
+	EnsureExportMap(Grid);
+	return ExportCells;
+}
+
+const TArray<int32>& UTagAgentSubsystem::GetExportDist(UTagGridSubsystem* Grid)
+{
+	EnsureExportMap(Grid);
+	return ExportDist;
 }

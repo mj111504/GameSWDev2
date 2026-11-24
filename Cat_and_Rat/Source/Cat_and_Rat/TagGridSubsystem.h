@@ -44,6 +44,7 @@ public:
 	int32 GetNumX() const { return NumX; }
 	int32 GetNumY() const { return NumY; }
 	float GetCellSize() const { return CellSize; }
+	int32 GetBuildCount() const { return BuildCount; }   // BuildGrid가 끝날 때마다 1씩 늘어남
 
 	// 상하좌우로 연결된 칸 (층이 바뀌는 계단·경사로 연결 포함)
 	void  GetNeighbors(int32 Cell, TArray<int32>& OutNeighbors) const;
@@ -88,6 +89,7 @@ private:
 	int32 NumY = 0;
 	int32 NumLinks = 0;
 	int32 MaxFloorsInColumn = 0;
+	int32 BuildCount = 0;
 
 	// 칸 정보. 칸 번호 = 이 배열들의 위치
 	TArray<FVector> NodePos;     // NavMesh 위의 점
