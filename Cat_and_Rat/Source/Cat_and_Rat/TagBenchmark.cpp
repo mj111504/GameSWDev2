@@ -315,7 +315,8 @@ namespace TagBench
 			Row(TEXT("2B"), Size, TEXT("uniform"), TEXT("FloydWarshall"), Reps, MsF, int64(N) * N * 4, Same, TEXT("-"), TEXT("-"));
 		}
 
-		// 80x80 플로이드-워셜은 너무 오래 걸려서 40x40 결과에 (6400/1600)^3 = 64를 곱해 추정
+		// 80x80 플로이드-워셜: 기본은 너무 오래 걸려서 40x40 결과에 (6400/1600)^3 = 64를 곱해 추정만 함.
+		// Tag.Bench2 full 이면 아래에서 직접 재고, 추정값 줄도 비교용으로 함께 출력함
 		{
 			const int32 Size = 80;
 			const int32 N = Size * Size;

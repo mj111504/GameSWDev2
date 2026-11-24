@@ -154,6 +154,7 @@ void UTagGridSubsystem::BuildGrid(float InCellSize)
 
 	UE_LOG(LogTemp, Log, TEXT("[TagGrid] Built %d x %d columns, %d cells, %d links (%d by nav path), max %d floors in one column, cell size %.0f"),
 		NumX, NumY, N, NumLinks, NumPathLinks, MaxFloorsInColumn, CellSize);
+	++BuildCount;   // 격자가 바뀌었음을 알림 (반출구역 거리표 같은 캐시를 다시 계산하게)
 
 	// 게임 시작 직후 NavMesh가 아직 준비 안 됐을 수 있어서, 0칸이면 0.5초 뒤 다시 시도 (최대 10번)
 	if (N == 0 && RetryCount < 10)
