@@ -126,6 +126,16 @@ void AItemSpawnManager::SpawnAllItems()
 			TotalMessinessWeight += Weight;
 			SpawnedCount++;
 
+			// 메쉬가 없어도 스폰 여부와 할당된 데이터를 확인하기 위한 로그
+			UE_LOG(LogTemp, Warning, TEXT("[Spawn #%d] 슬롯: %s | Row: %s | 등급: %d | 가중치: %d | 위치: %s"),
+				SpawnedCount,
+				*Slot->GetName(),
+				*ChosenRow.ToString(),
+				static_cast<int32>(AssignedSize),
+				Weight,
+				*SpawnedItem->GetActorLocation().ToString()
+			);
+
 			OnItemSpawned(SpawnedItem, ChosenRow, Weight);
 		}
 	}
