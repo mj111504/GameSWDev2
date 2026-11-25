@@ -90,6 +90,18 @@ void ATagRatAIController::OnCaught()
 	CancelReceive();
 }
 
+void ATagRatAIController::OnRespawned()
+{
+	bCaught = false;
+	bFleeing = false;
+	bStashing = false;
+	TargetItem = nullptr;
+	StashedItem = nullptr;
+	CancelHandOff();
+	CancelReceive();
+	GetWorld()->GetTimerManager().SetTimer(ThinkHandle, this, &ATagRatAIController::Think, 0.25f, true, 0.1f);
+}
+
 float ATagRatAIController::CatCellsTo(UTagGridSubsystem* Grid, int32 C) const
 {
 	if (CatDist[C] >= 0) return (float)CatDist[C];

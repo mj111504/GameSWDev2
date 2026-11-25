@@ -5,8 +5,12 @@
 맵 파일(.umap)은 git으로 합쳐지지 않아서, 팀원이 맵을 푸시하면 우리가 놓은 반출구역·테스트 물건이 사라질 수 있음.
 그래서 배치를 이 스크립트에 적어 두고, 맵을 새로 받으면 다시 실행해서 똑같이 놓음.
 
-사용법 (에디터 아래 Cmd 옆을 Python으로 바꾸고 한 줄씩 입력)
-    import sys; sys.path.append(r'C:/Users/yhtgr/Documents/GitHub/GameSWDev2/Cat_and_Rat/Scripts'); import tag_setup_level as t
+자동 실행: Content/Python/init_unreal.py가 에디터를 켤 때 이 파일을 t로 불러옴.
+          AUTO_PLACE_USERS에 있는 PC에서는 House_in_the_tropics를 열 때 빠진 것만 자동으로 놓음 (ensure)
+          그래서 보통은 아무것도 안 쳐도 됨. 직접 쓸 때는 Python 칸에서 t.명령()
+
+사용법 (에디터 아래 Cmd 옆을 Python으로 바꾸고 입력. t는 이미 불러와져 있음)
+    t.ensure()                    빠진 것만 놓음
     t.run()                       반출구역 + 물건 배치 매니저 + 슬롯을 아래 목록대로 놓음 (이미 있으면 위치·크기만 맞춤)
     t.run(spawn=False)            반출구역만
     t.run(items=True)             예전 테스트 물건 6개도 같이 (매니저를 쓰면 필요 없음)
@@ -54,7 +58,31 @@ SLOT_CLASS = '/Script/Cat_and_Rat.SpawnSlotBox'
 SLOT_PREFIX = 'TagSlot_'
 SPAWN_FOLDER = 'TagSpawn'
 # 슬롯 위치 (x, y, z). z = 바닥 + 50 (물건 충돌 구 반지름). t.capture_slots() 결과를 붙여 넣음
-SLOTS = [
+SLOTS = [   # 24 slots, 2026-11-25 손으로 맞춤 (지하 ~150, 1층 ~460, 2층 ~880, 옥상 ~1180)
+    (326, 747, 313),
+    (1530, -2470, 880),
+    (-57, 446, 490),
+    (-670, -1700, 460),
+    (1500, -1400, 167),
+    (1520, -200, 880),
+    (408, -1069, 1180),
+    (530, -2900, 460),
+    (-478, -228, 450),
+    (480, -940, 174),
+    (1630, 100, 160),
+    (-644, -2166, 450),
+    (1397, -139, 1180),
+    (-480, 850, 469),
+    (630, -1600, 460),
+    (1520, -1200, 1180),
+    (1630, 720, 150),
+    (930, -400, 460),
+    (399, 297, 300),
+    (1234, -2620, 450),
+    (-481, -2725, 490),
+    (1241, 886, 190),
+    (330, -700, 880),
+    (1032, -1438, 880),
 ]
 
 
@@ -228,6 +256,20 @@ def remove_test_items():
     unreal.log('[TagSetup] Removed test items')
 
 
+def ensure():
+    """반출구역·매니저·슬롯 중 빠진 게 있을 때만 run(). 다 있으면 아무것도 안 함 (맵이 '저장 안 됨'이 되지 않게)"""
+    labels = set(a.get_actor_label() for a in _eas().get_all_level_actors())
+    need = [n for n, _, _ in ZONES if n not in labels]
+    if SLOTS:
+        need += [SPAWN_MANAGER_LABEL] if SPAWN_MANAGER_LABEL not in labels else []
+        need += ['%s%02d' % (SLOT_PREFIX, i + 1) for i in range(len(SLOTS)) if '%s%02d' % (SLOT_PREFIX, i + 1) not in labels]
+    if need:
+        unreal.log('[TagSetup] Missing %d actors (%s ...). Placing them now.' % (len(need), ', '.join(need[:3])))
+        run()
+    else:
+        unreal.log('[TagSetup] Export zones, spawn manager and slots are already in this level.')
+
+
 # ---------------- 슬롯 자동 배치 ----------------
 def gen_slots(n=24, min_dist=300.0, zone_clear=400.0, seed=7):
     """NavMesh 위 후보 지점 중 서로 최대한 떨어진 n곳에 슬롯을 놓음 (가장 먼 점 고르기)
@@ -293,7 +335,7 @@ def capture_slots():
     unreal.log('[TagSetup] SLOTS = [   # %d slots' % len(slots))
     for a in slots:
         p = a.get_actor_location()
-        unreal.log('    (%d, %d, %d),' % (round(p.x), round(p.y), round(p.z)))
+        unreal.log('    (%d, %d, %d),   # [TagSetup] %s' % (round(p.x), round(p.y), round(p.z), a.get_actor_label()))
     unreal.log('[TagSetup] ]')
 
 

@@ -41,6 +41,7 @@ class CAT_AND_RAT_API ATagRatAIController : public AAIController
 
 public:
 	void OnCaught();
+	void OnRespawned();   // 명단 관리자가 부활 위치로 옮긴 뒤 호출. 다시 판단을 시작함
 
 	// 넘기기 받는 쪽: 넘기는 쥐(From)에게 다가가라 / 바로 앞에 내려놓은 물건을 주워라 / 취소
 	void BeginReceive(APawn* From, float Seconds);
