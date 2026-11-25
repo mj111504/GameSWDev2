@@ -14,6 +14,8 @@
 #include "EngineUtils.h"
 #include "DrawDebugHelpers.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 
 static TAutoConsoleVariable<int32> CVarPlayerIsRat(
 	TEXT("Tag.PlayerIsRat"), 1, TEXT("1 = the player-controlled character joins as a rat, 0 = it is ignored by the cats"));
@@ -23,6 +25,55 @@ static TAutoConsoleVariable<float> CVarRecoverScoreRatio(
 	TEXT("Tag.RecoverScoreRatio"), 0.5f, TEXT("Cat score for returning an item = item score x this ratio"));
 static TAutoConsoleVariable<float> CVarMessWinPercent(
 	TEXT("Tag.MessWinPercent"), 80.f, TEXT("Rats win when messiness goes over this percent"));
+static TAutoConsoleVariable<int32> CVarItemPlaceholder(
+	TEXT("Tag.ItemPlaceholder"), 1, TEXT("1 = attach a temporary cube to items that have no mesh yet (removed automatically once a real mesh is set), 0 = off"));
+
+// ---------- 테스트용 임시 큐브 ----------
+// 팀원이 물건 메시를 넣기 전까지만 씀. 게임 실행 중에만 붙이므로 BP나 맵에는 저장되지 않음.
+// 물건에 진짜 메시가 생기면(또는 Tag.ItemPlaceholder 0) 다음 갱신 때 바로 떼어 냄
+static const FName PlaceholderTag(TEXT("TagPlaceholder"));
+
+static void UpdatePlaceholder(APickupItem* Item, bool bHeld)
+{
+	UStaticMeshComponent* Placeholder = nullptr;
+	bool bHasRealMesh = false;
+	TInlineComponentArray<UStaticMeshComponent*> Meshes(Item);
+	for (UStaticMeshComponent* M : Meshes)
+	{
+		if (M->ComponentHasTag(PlaceholderTag)) Placeholder = M;
+		else if (M->GetStaticMesh()) bHasRealMesh = true;
+	}
+
+	const bool bWant = CVarItemPlaceholder.GetValueOnGameThread() != 0 && !bHasRealMesh;
+	if (!bWant)
+	{
+		if (Placeholder) Placeholder->DestroyComponent();
+		return;
+	}
+
+	if (!Placeholder)
+	{
+		static UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		if (!Cube || !Item->GetRootComponent()) return;
+		Placeholder = NewObject<UStaticMeshComponent>(Item);
+		Placeholder->ComponentTags.Add(PlaceholderTag);
+		Placeholder->SetStaticMesh(Cube);
+		// 바닥·벽에는 부딪히고(떨어뜨려도 안 뚫림), 조준 레이저에도 맞지만, 캐릭터는 막지 않음
+		Placeholder->SetCollisionProfileName(TEXT("BlockAllDynamic"));
+		Placeholder->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		Placeholder->RegisterComponent();
+		// 용접(weld)해서 붙임: 내려놓을 때 물리가 켜지면 큐브 충돌도 물건 몸체에 포함돼 바닥에 걸림
+		Placeholder->AttachToComponent(Item->GetRootComponent(),
+			FAttachmentTransformRules(EAttachmentRule::SnapToTarget, EAttachmentRule::SnapToTarget, EAttachmentRule::KeepRelative, true));
+		Item->AddInstanceComponent(Placeholder);
+	}
+
+	// 크기: 무게가 클수록 큰 큐브 (소형 25cm, 중형 40cm, 대형 60cm, 초대형 90cm). 무게가 나중에 들어와도 맞춰짐
+	const int32 W = Item->ItemInfo.Weight;
+	const float Side = W >= 10 ? 90.f : (W >= 6 ? 60.f : (W >= 3 ? 40.f : 25.f));
+	Placeholder->SetRelativeScale3D(FVector(Side / 100.f));
+	Placeholder->SetCollisionEnabled(bHeld ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
+}
 
 bool UTagAgentSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
@@ -183,7 +234,8 @@ void UTagAgentSubsystem::UpdateItems()
 	}
 
 	IConsoleVariable* DebugVar = IConsoleManager::Get().FindConsoleVariable(TEXT("Tag.Debug"));
-	if (DebugVar && DebugVar->GetInt() != 0) DrawExportZones(0.3f);   // 반출구역 = 하늘색 상자
+	const bool bDebug = DebugVar && DebugVar->GetInt() != 0;
+	if (bDebug) DrawExportZones(0.3f);   // 반출구역 = 하늘색 상자
 
 	// 1) 새로 생긴 물건 추가
 	for (TActorIterator<APickupItem> It(World); It; ++It)
@@ -213,6 +265,16 @@ void UTagAgentSubsystem::UpdateItems()
 		APawn* Holder = Cast<APawn>(Item->GetAttachParentActor());
 		E.Holder = Holder;
 		if (Holder) E.LastHolder = Holder;
+
+		UpdatePlaceholder(Item, Holder != nullptr);
+
+		// 물건 위에 "이름 w무게" 표시. 흰색 = 바닥, 노랑 = 누가 들고 있음, 하늘색 = 반출됨(어지러움에 들어감)
+		if (bDebug)
+		{
+			const FColor Color = Holder ? FColor::Yellow : (E.bExported ? FColor::Cyan : FColor::White);
+			DrawDebugString(World, Item->GetActorLocation() + FVector(0.f, 0.f, 70.f),
+				FString::Printf(TEXT("%s w%d"), *Item->ItemInfo.ItemName, Item->ItemInfo.Weight), nullptr, Color, 0.3f, false, 1.1f);
+		}
 
 		// 원래 위치: 처음 바닥에 놓인 상태로 본 위치 (생성 직후 위치를 옮기는 경우를 피하려고 다음 갱신 때 기록)
 		if (!E.bHomeSet && !Holder)

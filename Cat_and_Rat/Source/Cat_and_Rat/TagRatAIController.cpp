@@ -86,6 +86,8 @@ void ATagRatAIController::OnCaught()
 		Me->SetActorEnableCollision(false);
 	}
 	TargetItem = nullptr;
+	CancelHandOff();
+	CancelReceive();
 }
 
 float ATagRatAIController::CatCellsTo(UTagGridSubsystem* Grid, int32 C) const
@@ -192,15 +194,96 @@ void ATagRatAIController::Think()
 		UE_LOG(LogTemp, Warning, TEXT("[TagAI] %s has no InteractionComponent, so it can only flee"), *Me->GetName());
 	}
 
-	// 넘기기: 위험해지기 직전, 무거운 물건을 다른 쥐에게 넘김
-	if (bUseItems && Held && !bFleeing && Held->ItemInfo.Weight >= 3 && CatTimeToMe < Danger * 2.f
+	const float Now = GetWorld()->GetTimeSeconds();
+
+	// ---------- 넘기기 (넘기는 쪽) ----------
+	// 건네주러 가는 중이면: 받는 쥐에게 걸어가서 2m 안이면 내려놓고 받는 쥐에게 줍게 함
+	if (HandTo.IsValid() && Held)
+	{
+		APawn* R = HandTo.Get();
+		ATagRatAIController* RC = Cast<ATagRatAIController>(R->GetController());
+		const UInteractionComponent* RI = R->FindComponentByClass<UInteractionComponent>();
+		const bool bReceiverOk = RC && RI && !RI->IsHoldingItem() && Agents->IsRatAlive(R);
+		if (bFleeing || Now > HandUntil || !bReceiverOk)
+		{
+			CancelHandOff();   // 위험해졌거나, 시간이 지났거나, 받는 쥐가 못 받는 상태 → 취소
+		}
+		else
+		{
+			const FVector RPos = R->GetActorLocation();
+			if (FVector::Dist2D(Me->GetActorLocation(), RPos) < 200.f && FMath::Abs(Me->GetActorLocation().Z - RPos.Z) < 150.f)
+			{
+				Interact->DropItem(false);
+				Agents->TransferReservation(Held, R);
+				RC->ReceiveItem(Held);
+				UE_LOG(LogTemp, Log, TEXT("[TagAI] %s handed %s to %s at %.2f s"),
+					*Me->GetName(), *Held->ItemInfo.ItemName, *R->GetName(), Agents->GetElapsedSeconds());
+				HandTo = nullptr;
+				TargetItem = nullptr;
+				Held = nullptr;
+				bFleeing = true;   // 넘긴 쥐는 바로 도주해서 고양이를 끌고 감
+			}
+			else
+			{
+				MoveToLocation(RPos, 50.f, false, true, false, true, nullptr, true);
+				if (bDebug) DrawDebugLine(GetWorld(), Me->GetActorLocation(), RPos, FColor::White, false, 0.3f, 0, 4.f);
+				return;
+			}
+		}
+	}
+
+	// 넘기기 시작: 무게 3 이상, 고양이가 위험 시간 x 2 안, 반출구역까지 8칸보다 멀 때
+	if (bUseItems && Held && !bFleeing && !HandTo.IsValid() && Held->ItemInfo.Weight >= 3 && CatTimeToMe < Danger * 2.f
 		&& CVarRatHandOff.GetValueOnGameThread() != 0)
 	{
-		if (TryHandOff(Grid, Agents, Interact, CatTimeToMe))
+		const TArray<int32>& ExportDist = Agents->GetExportDist(Grid);
+		const bool bNearExport = Agents->IsInExportZone(Me->GetActorLocation())
+			|| (ExportDist.Num() == Grid->GetNumCells() && ExportDist[MyCell] >= 0 && ExportDist[MyCell] <= 8);
+		float ReceiverTime = 0.f;
+		APawn* R = bNearExport ? nullptr : ChooseReceiver(Grid, Agents, CatTimeToMe, ReceiverTime);
+		if (R)
 		{
-			Held = nullptr;
-			bFleeing = true;   // 넘긴 쥐는 바로 도주해서 고양이를 끌고 감
+			HandTo = R;
+			HandUntil = Now + 4.f;
+			Cast<ATagRatAIController>(R->GetController())->BeginReceive(Me, 4.f);
+			UE_LOG(LogTemp, Log, TEXT("[TagAI] %s passing %s to %s (cat %.1f s away, receiver %.1f s away)"),
+				*Me->GetName(), *Held->ItemInfo.ItemName, *R->GetName(), CatTimeToMe, ReceiverTime);
+			MoveToLocation(R->GetActorLocation(), 50.f, false, true, false, true, nullptr, true);
+			return;
 		}
+	}
+
+	// ---------- 넘기기 (받는 쪽) ----------
+	if (bUseItems && !Held && !bFleeing)
+	{
+		// 바로 앞에 내려놓인 물건: 고양이 조건을 다시 따지지 않고 바로 주움
+		APickupItem* Handed = HandedItem.Get();
+		if (Handed && Now < HandedUntil && !Handed->GetAttachParentActor())
+		{
+			const FVector P = Handed->GetActorLocation();
+			if (FVector::Dist2D(Me->GetActorLocation(), P) < CVarRatPickupRange.GetValueOnGameThread()
+				&& FMath::Abs(Me->GetActorLocation().Z - P.Z) < 200.f)
+			{
+				if (Interact->PickupItem(Handed))
+				{
+					StopMovement();
+					TargetItem = Handed;
+					UE_LOG(LogTemp, Log, TEXT("[TagAI] %s received %s at %.2f s"), *Me->GetName(), *Handed->ItemInfo.ItemName, Agents->GetElapsedSeconds());
+				}
+				CancelReceive();
+				return;
+			}
+			MoveToLocation(P, 30.f, false, true, false, true, nullptr, true);
+			return;
+		}
+		// 건네주러 오는 쥐가 있으면 그쪽으로 다가감
+		APawn* G = Giver.Get();
+		if (G && Now < GiverUntil && Agents->IsRatAlive(G))
+		{
+			MoveToLocation(G->GetActorLocation(), 50.f, false, true, false, true, nullptr, true);
+			return;
+		}
+		if (HandedItem.IsValid() || Giver.IsValid()) CancelReceive();
 	}
 
 	if (!bUseItems || bFleeing)
@@ -480,17 +563,16 @@ void ATagRatAIController::Carry(UTagGridSubsystem* Grid, UTagAgentSubsystem* Age
 
 // ======================== 넘기기 ========================
 
-bool ATagRatAIController::TryHandOff(UTagGridSubsystem* Grid, UTagAgentSubsystem* Agents, UInteractionComponent* Interact, float CatTimeToMe)
+APawn* ATagRatAIController::ChooseReceiver(UTagGridSubsystem* Grid, UTagAgentSubsystem* Agents, float CatTimeToMe, float& OutTime)
 {
 	APawn* Me = GetPawn();
-	APickupItem* Held = Interact->HeldItem;
-	if (!Held) return false;
 
 	// 받을 쥐: 빈손인 AI 쥐 중, 내 자리까지 고양이보다 1초 이상 먼저 올 수 있는 쥐. 여럿이면 가장 빨리 오는 쥐
+	// (실제로는 서로 마주 걸어가서 더 빨리 만남)
 	TArray<APawn*> Rats;
 	Agents->GetAliveRats(Rats);
 	APawn* Receiver = nullptr;
-	float BestTime = TNumericLimits<float>::Max();
+	OutTime = TNumericLimits<float>::Max();
 	for (APawn* R : Rats)
 	{
 		if (R == Me || !Cast<ATagRatAIController>(R->GetController())) continue;
@@ -502,20 +584,39 @@ bool ATagRatAIController::TryHandOff(UTagGridSubsystem* Grid, UTagAgentSubsystem
 
 		const float RSpeed = FMath::Max(1.f, R->GetMovementComponent()->GetMaxSpeed());
 		const float Time = RatDist[RCell] * Cs / RSpeed;
-		if (Time + 1.f < CatTimeToMe && Time < BestTime) { BestTime = Time; Receiver = R; }
+		if (Time + 1.f < CatTimeToMe && Time < OutTime) { OutTime = Time; Receiver = R; }
 	}
-	if (!Receiver) return false;
+	return Receiver;
+}
 
-	Interact->DropItem(false);
-	Agents->TransferReservation(Held, Receiver);
-	TargetItem = nullptr;
-	UE_LOG(LogTemp, Log, TEXT("[TagAI] %s handed %s to %s (cat %.1f s away, receiver %.1f s away)"),
-		*Me->GetName(), *Held->ItemInfo.ItemName, *Receiver->GetName(), CatTimeToMe, BestTime);
-	if (bDebug)
+void ATagRatAIController::CancelHandOff()
+{
+	if (APawn* R = HandTo.Get())
 	{
-		DrawDebugLine(GetWorld(), Me->GetActorLocation(), Receiver->GetActorLocation(), FColor::White, false, 1.0f, 0, 4.f);
+		if (ATagRatAIController* RC = Cast<ATagRatAIController>(R->GetController())) RC->CancelReceive();
+		UE_LOG(LogTemp, Log, TEXT("[TagAI] %s cancelled passing to %s"), *GetPawn()->GetName(), *R->GetName());
 	}
-	return true;
+	HandTo = nullptr;
+}
+
+void ATagRatAIController::BeginReceive(APawn* From, float Seconds)
+{
+	Giver = From;
+	GiverUntil = GetWorld()->GetTimeSeconds() + Seconds;
+	HandedItem = nullptr;
+}
+
+void ATagRatAIController::ReceiveItem(APickupItem* Item)
+{
+	Giver = nullptr;
+	HandedItem = Item;
+	HandedUntil = GetWorld()->GetTimeSeconds() + 3.f;
+}
+
+void ATagRatAIController::CancelReceive()
+{
+	Giver = nullptr;
+	HandedItem = nullptr;
 }
 
 // ======================== 숨겨 두기 ========================

@@ -14,8 +14,10 @@ class UTagAgentSubsystem;
  *
  *   1) 위험: 가장 가까운 고양이가 Tag.RatDanger 초 안에 올 수 있으면 → 들고 있던 물건을 버리고 도주
  *            (한 번 도주를 시작하면 고양이가 그 1.5배 시간 밖으로 멀어질 때까지 계속 도주. 왔다 갔다 방지)
- *   1-1) 넘기기: 무게 3 이상을 들고 있고 고양이가 Tag.RatDanger x 2 초 안에 오면,
- *            그 자리까지 고양이보다 먼저 올 수 있는 빈손 AI 쥐에게 물건을 넘김 (내려놓고 찜을 그 쥐에게 옮김)
+ *   1-1) 넘기기 (마주 보고 건네기): 무게 3 이상을 들고 있고 고양이가 Tag.RatDanger x 2 초 안에 오면,
+ *            내 자리까지 고양이보다 1초 이상 먼저 올 수 있는 빈손 AI 쥐를 고름. 둘이 서로를 향해 걸어가서
+ *            2m 안에 붙으면 내려놓고 받는 쥐가 바로 주움. 4초 안에 못 만나면 취소하고 계속 운반.
+ *            반출구역까지 8칸 안으로 가까우면 넘기지 않고 그냥 넣음
  *   2) 물건을 들고 있음: 반출구역으로 운반. 다익스트라로 "고양이 근처 칸은 비싸게" 계산한 길을 따라감
  *            반출구역 안에 들어가면 물건을 내려놓음 → 명단 관리자가 반출 완료 처리
  *      2-1) 숨겨 두기: 위험 비용 때문에 길 비용이 그냥 거리의 Tag.RatStashRatio 배를 넘으면 (고양이가 길을 막음)
@@ -40,6 +42,11 @@ class CAT_AND_RAT_API ATagRatAIController : public AAIController
 public:
 	void OnCaught();
 
+	// 넘기기 받는 쪽: 넘기는 쥐(From)에게 다가가라 / 바로 앞에 내려놓은 물건을 주워라 / 취소
+	void BeginReceive(APawn* From, float Seconds);
+	void ReceiveItem(APickupItem* Item);
+	void CancelReceive();
+
 protected:
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void OnUnPossess() override;
@@ -51,7 +58,8 @@ private:
 	void Flee(UTagGridSubsystem* Grid, int32 MyCell);
 	bool GoToItem(UTagGridSubsystem* Grid, UTagAgentSubsystem* Agents, UInteractionComponent* Interact);
 	void Carry(UTagGridSubsystem* Grid, UTagAgentSubsystem* Agents, UInteractionComponent* Interact, int32 MyCell);
-	bool TryHandOff(UTagGridSubsystem* Grid, UTagAgentSubsystem* Agents, UInteractionComponent* Interact, float CatTimeToMe);
+	APawn* ChooseReceiver(UTagGridSubsystem* Grid, UTagAgentSubsystem* Agents, float CatTimeToMe, float& OutTime);
+	void CancelHandOff();
 	void Stash(UTagGridSubsystem* Grid, UTagAgentSubsystem* Agents, UInteractionComponent* Interact, int32 MyCell);
 	void ReleaseMine(UTagAgentSubsystem* Agents);   // 내 찜 풀기 (숨겨 둔 물건은 남김)
 
@@ -66,6 +74,14 @@ private:
 	bool bStashing = false;                   // 숨길 칸으로 가는 중
 	TWeakObjectPtr<APickupItem> StashedItem;  // 방금 숨긴 물건. StashUntil까지는 다시 줍지 않음
 	float StashUntil = 0.f;
+
+	// 넘기기 상태
+	TWeakObjectPtr<APawn> HandTo;             // 넘기는 쪽: 건네주러 가는 쥐
+	float HandUntil = 0.f;
+	TWeakObjectPtr<APawn> Giver;              // 받는 쪽: 건네주러 오는 쥐
+	float GiverUntil = 0.f;
+	TWeakObjectPtr<APickupItem> HandedItem;   // 받는 쪽: 바로 앞에 내려놓인 물건
+	float HandedUntil = 0.f;
 	TWeakObjectPtr<APickupItem> TargetItem;   // 가지러 가는 물건
 
 	// BFS·다익스트라 결과를 매번 새로 할당하지 않으려고 멤버로 둠
