@@ -27,6 +27,10 @@
 #include "SpawnSlotBox.h"
 #include "GameFramework/PlayerStart.h"
 #include "GameFramework/Controller.h"
+#include "Components/WidgetComponent.h"
+#include "Blueprint/UserWidget.h"
+#include "Components/TextBlock.h"
+#include "Camera/PlayerCameraManager.h"
 
 static TAutoConsoleVariable<int32> CVarPlayerIsRat(
 	TEXT("Tag.PlayerIsRat"), 1, TEXT("1 = the player-controlled character joins as a rat, 0 = it is ignored by the cats"));
@@ -63,6 +67,89 @@ static FBox GetZoneBox(const AActor* Zone)
 // 물건에 진짜 메시가 생기면(또는 Tag.ItemPlaceholder 0) 다음 갱신 때 바로 떼어 냄
 static const FName PlaceholderTag(TEXT("TagPlaceholder"));
 
+// 소형 25cm, 중형 40cm, 대형 60cm, 초대형 90cm (가장 긴 변 기준)
+static float ItemSideByWeight(int32 W)
+{
+	return W >= 10 ? 90.f : (W >= 6 ? 60.f : (W >= 3 ? 40.f : 25.f));
+}
+
+// 진짜 메시 크기 맞추기: 데이터 테이블 메시는 실제 크기라(자동차·비행기는 몇 m) 쥐가 들 수 있게
+// 가장 긴 변이 무게별 크기가 되도록 한 번만 줄이거나 키움. 메시가 바뀌면 다시 맞춤. Tag.ItemAutoScale 0이면 안 함
+static TAutoConsoleVariable<int32> CVarItemAutoScale(
+	TEXT("Tag.ItemAutoScale"), 1, TEXT("1 = scale item meshes so their longest side matches the size for their weight (25/40/60/90 cm), 0 = keep the mesh's own size"));
+
+static void FitItemMesh(APickupItem* Item, UStaticMeshComponent* M)
+{
+	if (CVarItemAutoScale.GetValueOnGameThread() == 0) return;
+	UStaticMesh* Mesh = M->GetStaticMesh();
+	// 이미 이 메시로 맞췄으면 건너뜀 (태그에 메시 이름을 같이 적어 둠)
+	const FName Key(*FString::Printf(TEXT("TagFitted_%s"), *Mesh->GetName()));
+	if (M->ComponentHasTag(Key)) return;
+	M->ComponentTags.RemoveAll([](const FName& T) { return T.ToString().StartsWith(TEXT("TagFitted")); });
+
+	const FVector Size = Mesh->GetBounds().BoxExtent * 2.f;
+	const float Longest = FMath::Max3(Size.X, Size.Y, Size.Z);
+	if (Longest < 1.f) return;
+	const float Scale = ItemSideByWeight(Item->ItemInfo.Weight) / Longest;
+	M->SetRelativeScale3D(FVector(Scale));
+	// 메시 가운데가 물건 중심(충돌 구)에 오게
+	M->SetRelativeLocation(-Mesh->GetBounds().Origin * Scale);
+	M->ComponentTags.Add(Key);
+	UE_LOG(LogTemp, Log, TEXT("[TagAI] Fitted %s mesh %s: %.0f cm -> %.0f cm"),
+		*Item->ItemInfo.ItemName, *Mesh->GetName(), Longest, Longest * Scale);
+}
+
+// ---------- 물건 이름표 (패키징한 게임에서도 보임) ----------
+// 물건마다 화면 공간 위젯(WBP_ItemLabel, 안에 이름이 Label인 Text)을 붙여 이름을 띄움. 벽 뒤에 있어도 보임.
+// 흰색 = 바닥, 노랑 = 누가 들고 있음, 하늘색 = 반출됨. 너무 멀면 숨김
+static TAutoConsoleVariable<int32> CVarItemLabels(
+	TEXT("Tag.ItemLabels"), 1, TEXT("1 = show item name labels above items (also in packaged builds), 0 = off"));
+static TAutoConsoleVariable<float> CVarItemLabelDistance(
+	TEXT("Tag.ItemLabelDistance"), 3000.f, TEXT("Hide item name labels farther than this from the camera (cm). 0 = always show"));
+static const FName LabelTag(TEXT("TagLabel"));
+
+static void UpdateItemLabel(APickupItem* Item, UClass* LabelClass, const FColor& Color, bool bVisible)
+{
+	UWidgetComponent* Label = nullptr;
+	TInlineComponentArray<UWidgetComponent*> Widgets(Item);
+	for (UWidgetComponent* W : Widgets)
+	{
+		if (W->ComponentHasTag(LabelTag)) { Label = W; break; }
+	}
+	if (!LabelClass || !Item->GetRootComponent())
+	{
+		if (Label) Label->DestroyComponent();
+		return;
+	}
+	if (!Label)
+	{
+		Label = NewObject<UWidgetComponent>(Item);
+		Label->ComponentTags.Add(LabelTag);
+		Label->SetWidgetSpace(EWidgetSpace::Screen);
+		Label->SetDrawAtDesiredSize(true);
+		Label->SetPivot(FVector2D(0.5f, 1.f));
+		Label->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Label->SetWidgetClass(LabelClass);
+		Label->SetupAttachment(Item->GetRootComponent());
+		Label->RegisterComponent();
+		Item->AddInstanceComponent(Label);
+		Label->InitWidget();
+	}
+	Label->SetRelativeLocation(FVector(0.f, 0.f, ItemSideByWeight(Item->ItemInfo.Weight) * 0.6f + 30.f));
+	Label->SetVisibility(bVisible);
+	if (!bVisible) return;
+
+	if (UUserWidget* UW = Label->GetUserWidgetObject())
+	{
+		if (UTextBlock* T = Cast<UTextBlock>(UW->GetWidgetFromName(TEXT("Label"))))
+		{
+			const FText Txt = FText::FromString(Item->ItemInfo.ItemName);
+			if (!T->GetText().EqualTo(Txt)) T->SetText(Txt);
+			T->SetColorAndOpacity(FSlateColor(FLinearColor(Color)));
+		}
+	}
+}
+
 static void UpdatePlaceholder(APickupItem* Item, bool bHeld)
 {
 	UStaticMeshComponent* Placeholder = nullptr;
@@ -71,7 +158,7 @@ static void UpdatePlaceholder(APickupItem* Item, bool bHeld)
 	for (UStaticMeshComponent* M : Meshes)
 	{
 		if (M->ComponentHasTag(PlaceholderTag)) Placeholder = M;
-		else if (M->GetStaticMesh()) bHasRealMesh = true;
+		else if (M->GetStaticMesh()) { bHasRealMesh = true; FitItemMesh(Item, M); }
 	}
 
 	const bool bWant = CVarItemPlaceholder.GetValueOnGameThread() != 0 && !bHasRealMesh;
@@ -99,8 +186,7 @@ static void UpdatePlaceholder(APickupItem* Item, bool bHeld)
 	}
 
 	// 크기: 무게가 클수록 큰 큐브 (소형 25cm, 중형 40cm, 대형 60cm, 초대형 90cm). 무게가 나중에 들어와도 맞춰짐
-	const int32 W = Item->ItemInfo.Weight;
-	const float Side = W >= 10 ? 90.f : (W >= 6 ? 60.f : (W >= 3 ? 40.f : 25.f));
+	const float Side = ItemSideByWeight(Item->ItemInfo.Weight);
 	Placeholder->SetRelativeScale3D(FVector(Side / 100.f));
 	Placeholder->SetCollisionEnabled(bHeld ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
 }
@@ -416,6 +502,24 @@ void UTagAgentSubsystem::UpdateItems()
 	const bool bDebug = DebugVar && DebugVar->GetInt() != 0;
 	if (bDebug) DrawExportZones(0.3f);   // 반출구역 = 하늘색 상자
 
+	// 이름표 위젯 클래스: DefaultGame.ini [TagLayout] ItemLabelWidget (없으면 /Game/UI/WBP_ItemLabel)
+	if (!bTriedItemLabelClass)
+	{
+		bTriedItemLabelClass = true;
+		FString Path = TEXT("/Game/UI/WBP_ItemLabel.WBP_ItemLabel_C");
+		GConfig->GetString(TEXT("TagLayout"), TEXT("ItemLabelWidget"), Path, GGameIni);
+		ItemLabelClass = LoadClass<UUserWidget>(nullptr, *Path);
+		if (!ItemLabelClass) UE_LOG(LogTemp, Warning, TEXT("[TagAI] Item label widget not found: %s (labels off)"), *Path);
+	}
+	UClass* LabelClass = CVarItemLabels.GetValueOnGameThread() != 0 ? ItemLabelClass.Get() : nullptr;
+	const float LabelDist = CVarItemLabelDistance.GetValueOnGameThread();
+	FVector ViewPos = FVector::ZeroVector;
+	bool bHaveView = false;
+	if (APlayerController* PC = World->GetFirstPlayerController())
+	{
+		if (PC->PlayerCameraManager) { ViewPos = PC->PlayerCameraManager->GetCameraLocation(); bHaveView = true; }
+	}
+
 	// 1) 새로 생긴 물건 추가
 	for (TActorIterator<APickupItem> It(World); It; ++It)
 	{
@@ -447,8 +551,15 @@ void UTagAgentSubsystem::UpdateItems()
 
 		UpdatePlaceholder(Item, Holder != nullptr);
 
-		// 물건 위에 "이름 w무게" 표시. 흰색 = 바닥, 노랑 = 누가 들고 있음, 하늘색 = 반출됨(어지러움에 들어감)
-		if (bDebug)
+		// 이름표 위젯 (게임용). 흰색 = 바닥, 노랑 = 누가 들고 있음, 하늘색 = 반출됨
+		{
+			const FColor Color = Holder ? FColor::Yellow : (E.bExported ? FColor::Cyan : FColor::White);
+			const bool bNear = !bHaveView || LabelDist <= 0.f || FVector::Dist(ViewPos, Item->GetActorLocation()) <= LabelDist;
+			UpdateItemLabel(Item, LabelClass, Color, bNear);
+		}
+
+		// 디버그 표시 "이름 w무게" (이름표 위젯이 없을 때만. Shipping 빌드에서는 안 보임)
+		if (bDebug && !LabelClass)
 		{
 			const FColor Color = Holder ? FColor::Yellow : (E.bExported ? FColor::Cyan : FColor::White);
 			DrawDebugString(World, Item->GetActorLocation() + FVector(0.f, 0.f, 70.f),

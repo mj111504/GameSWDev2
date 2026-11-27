@@ -176,6 +176,11 @@ private:
 	float StartTime = 0.f;
 
 	TArray<FTagItemEntry> Items;
+
+	// 물건 이름표 위젯 클래스 (WBP_ItemLabel). 게임마다 한 번 불러옴
+	UPROPERTY()
+	TObjectPtr<UClass> ItemLabelClass = nullptr;
+	bool bTriedItemLabelClass = false;
 	int32 ExportedScore = 0;    // 쥐 팀이 반출로 얻은 점수 합
 	int32 RecoveredScore = 0;   // 고양이 팀이 회수로 얻은 점수 합
 	int32 MessWeight = 0;       // 지금 어지러움에 들어가 있는 가중치 합
