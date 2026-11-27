@@ -570,28 +570,62 @@ void ATagRatAIController::Carry(UTagGridSubsystem* Grid, UTagAgentSubsystem* Age
 		}
 	}
 
-	// 제자리 감지: 1.5초 동안 50cm도 못 움직였으면 3초 동안 반출구역 칸으로 NavMesh 길찾기에 직접 맡김
-	// (격자 경로의 중간 지점이 계단 위아래·다른 층으로 잡혀 NavMesh가 거기까지 못 가는 경우 대비)
+	// 제자리 감지: 1.5초 동안 50cm도 못 움직였으면 3초 동안 다른 목적지를 NavMesh 길찾기에 직접 맡김.
+	// 계속 막히면 목적지를 바꿔 가며 다시 시도함
+	//   1번째: 가장 가까운 반출구역 칸   2번째: 그 구역 한가운데에 가장 가까운 칸   3번째부터: 같은 구역 안 아무 칸
+	// (격자 경로 중간 지점이 계단 위아래·다른 층에 잡히거나, 벽 모서리에 몸이 걸려 못 가는 경우 대비)
 	const float Now = GetWorld()->GetTimeSeconds();
 	const bool bResumed = (Now - CarryLastTick) > 0.6f;   // 운반 판단은 0.25초마다라, 그보다 오래 비었으면 새로 시작
 	CarryLastTick = Now;
-	if (bResumed || CarryCheckTime < 0.f || FVector::Dist(MyPos, CarryCheckPos) > 50.f)
+	const bool bMoved = FVector::Dist(MyPos, CarryCheckPos) > 50.f;
+	if (bResumed || CarryCheckTime < 0.f || bMoved)
 	{
 		CarryCheckPos = MyPos;
 		CarryCheckTime = Now;
+		if (bResumed || (bMoved && Now >= CarryDirectUntil)) CarryStuckCount = 0;
 	}
 	else if (Now - CarryCheckTime > 1.5f && Now >= CarryDirectUntil)
 	{
-		const int32 DirectCell = (Target != INDEX_NONE) ? Target : ExportCells[0];
-		UE_LOG(LogTemp, Warning, TEXT("[TagAI] %s carry stuck %.1f s: cell %d, target %d, goal %.0f cm away. Using direct NavMesh path"),
-			*Me->GetName(), Now - CarryCheckTime, MyCell, DirectCell, FVector::Dist(MyPos, Goal));
+		++CarryStuckCount;
+		const int32 Base = (Target != INDEX_NONE) ? Target : ExportCells[0];
+		const FVector BasePos = Grid->CellToWorld(Base);
+
+		// 같은 구역 칸 = 기준 칸에서 8m 안의 반출구역 칸
+		TArray<int32> Same;
+		FVector Sum = FVector::ZeroVector;
+		for (int32 C : ExportCells)
+		{
+			const FVector P = Grid->CellToWorld(C);
+			if (FVector::Dist(P, BasePos) < 800.f) { Same.Add(C); Sum += P; }
+		}
+
+		int32 Pick = Base;
+		if (CarryStuckCount == 2 && Same.Num() > 0)
+		{
+			const FVector Center = Sum / Same.Num();
+			float BestD = TNumericLimits<float>::Max();
+			for (int32 C : Same)
+			{
+				const float D = FVector::DistSquared(Grid->CellToWorld(C), Center);
+				if (D < BestD) { BestD = D; Pick = C; }
+			}
+		}
+		else if (CarryStuckCount >= 3 && Same.Num() > 0)
+		{
+			Pick = Same[FMath::RandRange(0, Same.Num() - 1)];
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[TagAI] %s carry stuck #%d (%.1f s): cell %d, goal %.0f cm away -> trying export cell %d (%.0f cm away)"),
+			*Me->GetName(), CarryStuckCount, Now - CarryCheckTime, MyCell, FVector::Dist(MyPos, Goal),
+			Pick, FVector::Dist(MyPos, Grid->CellToWorld(Pick)));
+		CarryDirectCell = Pick;
 		CarryDirectUntil = Now + 3.f;
 		CarryCheckPos = MyPos;
 		CarryCheckTime = Now;
 	}
-	if (Now < CarryDirectUntil)
+	if (Now < CarryDirectUntil && CarryDirectCell != INDEX_NONE)
 	{
-		Goal = Grid->CellToWorld((Target != INDEX_NONE) ? Target : ExportCells[0]);
+		Goal = Grid->CellToWorld(CarryDirectCell);
 	}
 
 	MoveToLocation(Goal, 30.f, false, true, false, true, nullptr, true);

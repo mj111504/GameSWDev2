@@ -33,7 +33,7 @@ static TAutoConsoleVariable<float> CVarRecoverRadius(
 static TAutoConsoleVariable<float> CVarRecoverScoreRatio(
 	TEXT("Tag.RecoverScoreRatio"), 0.5f, TEXT("Cat score for returning an item = item score x this ratio"));
 static TAutoConsoleVariable<float> CVarMessWinPercent(
-	TEXT("Tag.MessWinPercent"), 50.f, TEXT("Rats win when messiness goes over this percent"));
+	TEXT("Tag.MessWinPercent"), 65.f, TEXT("Rats win when messiness goes over this percent"));
 static TAutoConsoleVariable<float> CVarMessMultiplier(
 	TEXT("Tag.MessMultiplier"), 2.f, TEXT("Messiness each exported item adds = its share of total weight x this (1 = plain share). Capped at 100%"));
 static TAutoConsoleVariable<float> CVarRespawnSeconds(
@@ -794,10 +794,27 @@ void UTagAgentSubsystem::EnsureExportMap(UTagGridSubsystem* Grid)
 		FBox Box = GetZoneBox(Zone);
 		Box.Min.Z -= 150.f;
 
+		// 목표 칸은 상자 가장자리에서 60cm 이상 안쪽 칸만 씀.
+		// 가장자리 칸을 목표로 하면 쥐가 도착 판정 거리(30cm) 앞에서 멈춰 상자 밖에 서 있게 되고,
+		// 그러면 '반출구역 안'으로 안 쳐서 물건을 못 내려놓고 계속 서 있음
+		const float Inset = 60.f;
+		FBox Inner = Box;
+		Inner.Min.X += Inset; Inner.Min.Y += Inset;
+		Inner.Max.X -= Inset; Inner.Max.Y -= Inset;
+		const bool bInnerOk = Inner.Min.X < Inner.Max.X && Inner.Min.Y < Inner.Max.Y;
+
 		const int32 Before = ExportCells.Num();
 		for (int32 C = 0; C < Grid->GetNumCells(); ++C)
 		{
-			if (Box.IsInsideOrOn(Grid->CellToWorld(C))) ExportCells.Add(C);
+			if (bInnerOk && Inner.IsInsideOrOn(Grid->CellToWorld(C))) ExportCells.Add(C);
+		}
+		// 안쪽 칸이 없으면 (작은 상자) 상자 안 칸 전부
+		if (ExportCells.Num() == Before)
+		{
+			for (int32 C = 0; C < Grid->GetNumCells(); ++C)
+			{
+				if (Box.IsInsideOrOn(Grid->CellToWorld(C))) ExportCells.Add(C);
+			}
 		}
 
 		// 상자 안에 칸이 하나도 없으면 (NavMesh 밖에 놓은 경우) 상자 바닥 가운데에서 가장 가까운 칸을 씀
