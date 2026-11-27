@@ -5,6 +5,7 @@
 #include "TagRatAIController.h"
 #include "NavigationSystem.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SphereComponent.h"
 
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -113,6 +114,23 @@ static void FitItemMesh(APickupItem* Item, UStaticMeshComponent* M)
 		if (!P->IsSimulatingPhysics()) P->SetSimulatePhysics(true);
 		P->WakeAllRigidBodies();
 		UE_LOG(LogTemp, Log, TEXT("[TagAI] Woke physics on %s (%s)"), *Item->ItemInfo.ItemName, *P->GetName());
+	}
+
+	// 물건 루트는 충돌 구(PickupItem의 CollisionComponent, 반지름 50)이고 처음엔 물리가 꺼져 있어서
+	// 슬롯 높이에 그대로 떠 있음 (한 번 들었다 놓아야 물리가 켜짐). 바닥에 놓인 물건이면 여기서 물리를 켜서 바로 떨어지게 함.
+	// 크기를 키운 메시가 바닥에 파묻히지 않게 구 반지름도 메시 높이의 절반 이상으로 맞춤
+	if (USphereComponent* Sphere = Cast<USphereComponent>(Item->GetRootComponent()))
+	{
+		const float HalfHeight = Mesh->GetBounds().BoxExtent.Z * Scale;
+		if (Sphere->GetUnscaledSphereRadius() < HalfHeight) Sphere->SetSphereRadius(HalfHeight);
+		if (!Item->GetAttachParentActor() && Sphere->GetCollisionEnabled() != ECollisionEnabled::NoCollision
+			&& !Sphere->IsSimulatingPhysics())
+		{
+			Sphere->SetSimulatePhysics(true);
+			Sphere->WakeAllRigidBodies();
+			UE_LOG(LogTemp, Log, TEXT("[TagAI] Turned on physics for %s (radius %.0f)"),
+				*Item->ItemInfo.ItemName, Sphere->GetUnscaledSphereRadius());
+		}
 	}
 }
 
