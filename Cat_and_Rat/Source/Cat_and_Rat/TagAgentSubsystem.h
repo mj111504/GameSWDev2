@@ -145,6 +145,7 @@ private:
 	bool ChooseRespawnPoint(FVector& OutPos) const;   // 반출구역 중 고양이에게서 걸어서 가장 먼 구역 안 랜덤 위치
 	void CatsWin(const FString& Reason);
 	void UpdateItems();          // 0.25초마다 물건 목록·들고 있는 사람·반출 여부 갱신
+	void SpawnLayout(UWorld& World);   // 맵에 반출구역·슬롯·스폰 매니저가 없으면 DefaultGame.ini [TagLayout] 좌표대로 생성
 	void FindExportZones();
 	void ExportItem(FTagItemEntry& Entry);
 	void RecoverItem(FTagItemEntry& Entry);

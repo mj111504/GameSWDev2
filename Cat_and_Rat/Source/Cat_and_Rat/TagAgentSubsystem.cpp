@@ -19,6 +19,12 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/TriggerBox.h"
+#include "Components/BoxComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "Misc/ConfigCacheIni.h"
+#include "ItemSpawnManager.h"
+#include "SpawnSlotBox.h"
 
 static TAutoConsoleVariable<int32> CVarPlayerIsRat(
 	TEXT("Tag.PlayerIsRat"), 1, TEXT("1 = the player-controlled character joins as a rat, 0 = it is ignored by the cats"));
@@ -106,6 +112,7 @@ void UTagAgentSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	InWorld.GetTimerManager().SetTimer(PlayerScanHandle,
 		FTimerDelegate::CreateUObject(this, &UTagAgentSubsystem::RegisterPlayers), 0.5f, true);
 
+	SpawnLayout(InWorld);   // 반출구역을 먼저 만들어야 아래에서 찾음
 	FindExportZones();
 	UpdateItems();
 	InWorld.GetTimerManager().SetTimer(ItemScanHandle,
@@ -616,6 +623,113 @@ int32 UTagAgentSubsystem::CountRecoveringCats(const APawn* Except) const
 const FTagItemEntry* UTagAgentSubsystem::FindEntry(const APickupItem* Item) const
 {
 	return Items.FindByPredicate([Item](const FTagItemEntry& E) { return E.Item.Get() == Item; });
+}
+
+// ======================== 맵 배치 (반출구역 · 슬롯 · 스폰 매니저) ========================
+// 좌표는 Config/DefaultGame.ini 의 [TagLayout] 에 있음 (에디터 Python t.save_layout() / t.capture_slots()가 씀).
+// 맵 파일(.umap)에 저장하지 않아도 게임을 시작할 때마다 여기서 만듦.
+// 그래서 로비에서 넘어와도, 패키징한 게임에서도 항상 깔리고, 팀원과 맵 파일이 충돌할 일이 없음.
+// 이미 맵에 있는 것(에디터에서 Python이 깐 것, 맵에 저장된 것)은 건너뜀 → 두 번 깔리지 않음.
+// 이 함수는 다른 액터들의 BeginPlay보다 먼저 불리므로, 스폰 매니저가 BeginPlay에서 슬롯을 찾을 때 이미 슬롯이 있음.
+static const TCHAR* LayoutSection = TEXT("TagLayout");
+
+// "a,b,c" → 숫자 Want개. 개수가 다르면 false
+static bool ParseNumbers(const FString& Text, int32 First, int32 Want, TArray<float>& Out)
+{
+	TArray<FString> Parts;
+	Text.ParseIntoArray(Parts, TEXT(","), true);
+	if (Parts.Num() != First + Want) return false;
+	Out.Reset();
+	for (int32 i = First; i < Parts.Num(); ++i) Out.Add(FCString::Atof(*Parts[i].TrimStartAndEnd()));
+	return true;
+}
+
+void UTagAgentSubsystem::SpawnLayout(UWorld& World)
+{
+	FString Map;
+	GConfig->GetString(LayoutSection, TEXT("Map"), Map, GGameIni);
+	const FString Current = UGameplayStatics::GetCurrentLevelName(&World, true);   // PIE 접두어 뺀 맵 이름
+	if (Map.IsEmpty() || !Current.Equals(Map, ESearchCase::IgnoreCase)) return;   // 로비 등 다른 맵이면 아무것도 안 함
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	// 1) 반출구역: 태그 ExportZone 달린 액터가 하나도 없을 때만
+	int32 NumZones = 0;
+	bool bHasZone = false;
+	for (TActorIterator<AActor> It(&World); It; ++It)
+	{
+		if (It->ActorHasTag(TEXT("ExportZone"))) { bHasZone = true; break; }
+	}
+	if (!bHasZone)
+	{
+		TArray<FString> Lines;
+		GConfig->GetArray(LayoutSection, TEXT("Zone"), Lines, GGameIni);
+		for (const FString& Line : Lines)
+		{
+			// 이름,x,y,z,반지름x,반지름y,반지름z
+			TArray<float> V;
+			if (!ParseNumbers(Line, 1, 6, V)) { UE_LOG(LogTemp, Warning, TEXT("[TagLayout] Bad Zone line: %s"), *Line); continue; }
+			ATriggerBox* Zone = World.SpawnActor<ATriggerBox>(FVector(V[0], V[1], V[2]), FRotator::ZeroRotator, Params);
+			if (!Zone) continue;
+			if (UBoxComponent* Box = Cast<UBoxComponent>(Zone->GetCollisionComponent())) Box->SetBoxExtent(FVector(V[3], V[4], V[5]));
+			Zone->Tags.Add(TEXT("ExportZone"));
+			++NumZones;
+		}
+	}
+
+	// 2) 슬롯: SpawnSlotBox가 하나도 없을 때만
+	int32 NumSlots = 0;
+	TArray<AActor*> Found;
+	UGameplayStatics::GetAllActorsOfClass(&World, ASpawnSlotBox::StaticClass(), Found);
+	if (Found.Num() == 0)
+	{
+		TArray<FString> Lines;
+		GConfig->GetArray(LayoutSection, TEXT("Slot"), Lines, GGameIni);
+		for (const FString& Line : Lines)
+		{
+			// x,y,z  (Python에서 손으로 맞춘 위치 그대로)
+			TArray<float> V;
+			if (!ParseNumbers(Line, 0, 3, V)) { UE_LOG(LogTemp, Warning, TEXT("[TagLayout] Bad Slot line: %s"), *Line); continue; }
+			if (World.SpawnActor<ASpawnSlotBox>(FVector(V[0], V[1], V[2]), FRotator::ZeroRotator, Params)) ++NumSlots;
+		}
+	}
+
+	// 3) 스폰 매니저: 없으면 팀원 BP(MyItemSpawnManager)를 생성 → 그 BeginPlay에서 슬롯마다 물건을 만듦
+	TArray<AActor*> Managers;
+	UGameplayStatics::GetAllActorsOfClass(&World, AItemSpawnManager::StaticClass(), Managers);
+	bool bMadeManager = false;
+	if (Managers.Num() == 0)
+	{
+		FString ClassPath;
+		GConfig->GetString(LayoutSection, TEXT("SpawnManager"), ClassPath, GGameIni);
+		UClass* Cls = ClassPath.IsEmpty() ? nullptr : LoadClass<AItemSpawnManager>(nullptr, *ClassPath);
+		if (Cls)
+		{
+			bMadeManager = World.SpawnActor<AItemSpawnManager>(Cls, FVector::ZeroVector, FRotator::ZeroRotator, Params) != nullptr;
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[TagLayout] Spawn manager class not found: %s"), *ClassPath);
+		}
+	}
+	else if (NumSlots > 0)
+	{
+		// 맵에 원래 있던 매니저가 우리 슬롯보다 먼저 물건을 만들려고 했으면(0개) 다음 프레임에 한 번 더 시킴
+		// 이미 만든 슬롯은 bIsOccupied라 건너뛰므로 두 번 생기지 않음
+		for (AActor* A : Managers)
+		{
+			AItemSpawnManager* M = Cast<AItemSpawnManager>(A);
+			World.GetTimerManager().SetTimerForNextTick(FTimerDelegate::CreateWeakLambda(M, [M]()
+			{
+				if (M->TotalMessinessWeight == 0) M->SpawnAllItems();
+			}));
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[TagLayout] %s: spawned %d export zones, %d slots, %s spawn manager (already in level: zones %s, slots %d, managers %d)"),
+		*Current, NumZones, NumSlots, bMadeManager ? TEXT("1") : TEXT("0"),
+		bHasZone ? TEXT("yes") : TEXT("no"), Found.Num(), Managers.Num());
 }
 
 // ======================== 반출구역 ========================

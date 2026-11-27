@@ -6,7 +6,7 @@
 그래서 배치를 이 스크립트에 적어 두고, 맵을 새로 받으면 다시 실행해서 똑같이 놓음.
 
 자동 실행: Content/Python/init_unreal.py가 에디터를 켤 때 이 파일을 t로 불러옴.
-          AUTO_PLACE_USERS에 있는 PC에서는 House_in_the_tropics를 열 때 빠진 것만 자동으로 놓음 (ensure)
+          House_in_the_tropics를 열 때 빠진 것만 자동으로 놓음 (ensure)
           그래서 보통은 아무것도 안 쳐도 됨. 직접 쓸 때는 Python 칸에서 t.명령()
 
 사용법 (에디터 아래 Cmd 옆을 Python으로 바꾸고 입력. t는 이미 불러와져 있음)
@@ -18,15 +18,25 @@
   슬롯 정하기
     t.gen_slots(24)               NavMesh 위에서 서로 최대한 떨어진 24곳을 골라 슬롯을 놓음 (반출구역 근처 제외)
                                   → 위에서 보며 이상한 슬롯을 옮기거나 지움
-    t.capture_slots()             지금 맵의 슬롯 위치를 SLOTS 목록 형태로 출력 → 아래 SLOTS에 붙여 넣고 저장
+    t.capture_slots()             지금 맵의 슬롯 위치를 SLOTS 목록 형태로 출력하고 Config/DefaultGame.ini [TagLayout]에도 저장
+    t.save_layout()               지금 ZONES·SLOTS 목록을 Config/DefaultGame.ini [TagLayout]에 저장
     t.remove_spawn()              매니저와 슬롯 지우기
-    t.add_zone_here('ExportZone_Garage')   뷰포트 카메라 바로 아래 바닥에 반출구역 추가. ZONES에 붙여 넣을 줄을 출력함
+    t.add_zone_here('ExportZone_Garage')   뷰포트 카메라 바로 아래 바닥에 반출구역 추가하고 ini에 저장
     t.list_zones()                지금 맵에 있는 반출구역 목록
     t.remove_test_items()         테스트 물건 지우기
 스크립트를 고친 뒤에는  import importlib; importlib.reload(t)
 
 모든 변경은 Ctrl+Z로 되돌릴 수 있음. 저장은 직접 (Ctrl+S).
+
+게임 실행 때 배치 (2026-11-27~)
+    반출구역·슬롯·스폰 매니저 좌표는 Config/DefaultGame.ini [TagLayout]에 한 번만 적어 둠.
+    게임을 시작하면 C++ TagAgentSubsystem::SpawnLayout이 이 좌표로 직접 만듦 (맵에 없을 때만).
+    그래서 맵 파일을 저장하지 않아도 로비에서 넘어오거나 패키징한 게임에서도 깔림.
+    이 스크립트는 에디터에서 위치를 보여 주고 고치는 용도. 이 파일 아래 ZONES·SLOTS는 ini가 없을 때 쓰는 기본값이고,
+    ini에 [TagLayout]이 있으면 불러올 때 ini 값으로 바뀜.
+    ini를 바꾼 뒤에는 에디터를 다시 켜야 C++(게임 실행)에 반영됨.
 """
+import os
 import unreal
 
 # ---------------- 배치 목록 ----------------
@@ -84,6 +94,96 @@ SLOTS = [   # 24 slots, 2026-11-25 손으로 맞춤 (지하 ~150, 1층 ~460, 2�
     (330, -700, 880),
     (1032, -1438, 880),
 ]
+
+
+# ---------------- DefaultGame.ini [TagLayout] (C++ 게임 실행 배치와 같은 좌표) ----------------
+LAYOUT_MAP = 'House_in_the_tropics'
+LAYOUT_SECTION = 'TagLayout'
+SPAWN_MANAGER_CLASS = SPAWN_MANAGER_BP + '.' + SPAWN_MANAGER_BP.rsplit('/', 1)[-1] + '_C'
+
+
+def _ini_path():
+    cfg = unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_config_dir())
+    return os.path.join(cfg, 'DefaultGame.ini')
+
+
+def _read_ini_lines():
+    path = _ini_path()
+    if not os.path.exists(path):
+        return [], ''
+    raw = open(path, 'rb').read()
+    bom = raw.startswith(b'\xef\xbb\xbf')
+    text = raw.decode('utf-8-sig', errors='replace')
+    return text.replace('\r\n', '\n').split('\n'), ('bom' if bom else '')
+
+
+def _load_layout_from_ini():
+    """ini에 [TagLayout]이 있으면 ZONES·SLOTS를 그 값으로 바꿈"""
+    global ZONES, SLOTS
+    lines, _ = _read_ini_lines()
+    inside = False
+    zones, slots = [], []
+    for line in lines:
+        t = line.strip()
+        if t.startswith('[') and t.endswith(']'):
+            inside = (t[1:-1] == LAYOUT_SECTION)
+            continue
+        if not inside or '=' not in t:
+            continue
+        key, val = t.split('=', 1)
+        key = key.lstrip('+').strip()
+        parts = [x.strip() for x in val.split(',')]
+        try:
+            if key == 'Zone' and len(parts) == 7:
+                n = [float(x) for x in parts[1:]]
+                zones.append((parts[0], tuple(n[:3]), tuple(n[3:])))
+            elif key == 'Slot' and len(parts) == 3:
+                slots.append(tuple(int(round(float(x))) for x in parts))
+        except ValueError:
+            unreal.log_warning('[TagSetup] Bad line in [%s]: %s' % (LAYOUT_SECTION, t))
+    if zones:
+        ZONES = zones
+    if slots:
+        SLOTS = slots
+    return bool(zones or slots)
+
+
+def save_layout():
+    """지금 ZONES·SLOTS를 Config/DefaultGame.ini [TagLayout]에 씀 (다른 섹션은 그대로 둠)"""
+    lines, enc = _read_ini_lines()
+    out, skip = [], False
+    for line in lines:
+        t = line.strip()
+        if t.startswith('[') and t.endswith(']'):
+            skip = (t[1:-1] == LAYOUT_SECTION)
+        if not skip:
+            out.append(line)
+    while out and out[-1].strip() == '':
+        out.pop()
+    out += ['', '[%s]' % LAYOUT_SECTION,
+            '; Cat_and_Rat map layout. At game start C++ TagAgentSubsystem::SpawnLayout spawns these if the level does not have them.',
+            '; Written by editor Python t.capture_slots() / t.save_layout(). Restart the editor after changing.',
+            'Map=%s' % LAYOUT_MAP,
+            'SpawnManager=%s' % SPAWN_MANAGER_CLASS]
+    for name, loc, ext in ZONES:
+        out.append('+Zone=%s,%g,%g,%g,%g,%g,%g' % ((name,) + tuple(loc) + tuple(ext)))
+    for x, y, z in SLOTS:
+        out.append('+Slot=%d,%d,%d' % (x, y, z))
+    out.append('')
+    data = '\r\n'.join(out).encode('utf-8')
+    if enc == 'bom':
+        data = b'\xef\xbb\xbf' + data
+    with open(_ini_path(), 'wb') as f:
+        f.write(data)
+    unreal.log('[TagSetup] Saved %d zones and %d slots to %s [%s]. Restart the editor so the game (C++) uses them.'
+               % (len(ZONES), len(SLOTS), _ini_path(), LAYOUT_SECTION))
+
+
+try:
+    if _load_layout_from_ini():
+        unreal.log('[TagSetup] Layout loaded from DefaultGame.ini [%s]: %d zones, %d slots' % (LAYOUT_SECTION, len(ZONES), len(SLOTS)))
+except Exception as e:
+    unreal.log_warning('[TagSetup] Could not read DefaultGame.ini [%s]: %s' % (LAYOUT_SECTION, e))
 
 
 # ---------------- 내부 함수 ----------------
@@ -235,8 +335,10 @@ def add_zone_here(name, ex=300.0, ey=300.0, ez=150.0):
     loc = (round(cam.x), round(cam.y), round(floor.z + ez))
     with unreal.ScopedEditorTransaction('Tag add zone'):
         _place_zone(name, loc, (ex, ey, ez))
-    unreal.log('[TagSetup] Added %s. Paste this into ZONES:' % name)
-    unreal.log("    ('%s', (%.1f, %.1f, %.1f), (%.1f, %.1f, %.1f))," % (name, loc[0], loc[1], loc[2], ex, ey, ez))
+    global ZONES
+    ZONES = [z for z in ZONES if z[0] != name] + [(name, (float(loc[0]), float(loc[1]), float(loc[2])), (ex, ey, ez))]
+    unreal.log('[TagSetup] Added %s at %s' % (name, loc))
+    save_layout()
 
 
 def list_zones():
@@ -329,7 +431,7 @@ def gen_slots(n=24, min_dist=300.0, zone_clear=400.0, seed=7):
 
 
 def capture_slots():
-    """지금 맵에 있는 TagSlot_ 슬롯 위치를 SLOTS 목록 형태로 출력. 이 줄들을 위 SLOTS = [ ] 안에 붙여 넣음"""
+    """지금 맵에 있는 TagSlot_ 슬롯 위치를 SLOTS 목록 형태로 출력하고 DefaultGame.ini [TagLayout]에 저장"""
     slots = sorted([a for a in _eas().get_all_level_actors() if a.get_actor_label().startswith(SLOT_PREFIX)],
                    key=lambda a: a.get_actor_label())
     unreal.log('[TagSetup] SLOTS = [   # %d slots' % len(slots))
@@ -337,6 +439,10 @@ def capture_slots():
         p = a.get_actor_location()
         unreal.log('    (%d, %d, %d),   # [TagSetup] %s' % (round(p.x), round(p.y), round(p.z), a.get_actor_label()))
     unreal.log('[TagSetup] ]')
+    if slots:
+        global SLOTS
+        SLOTS = [(round(a.get_actor_location().x), round(a.get_actor_location().y), round(a.get_actor_location().z)) for a in slots]
+        save_layout()
 
 
 def remove_spawn():
