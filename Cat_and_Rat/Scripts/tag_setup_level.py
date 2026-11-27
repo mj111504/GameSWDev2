@@ -29,6 +29,8 @@
     t.list_meshes('cup')          프로젝트의 Static Mesh 중 이름에 cup이 들어간 것 (빈칸이면 전부)
     t.set_item_meshes({'Item_03': '/Game/.../SM_a_cup'})   행마다 메시를 넣고 테이블 저장
     t.set_item_meshes(ITEM_MESHES)                          아래 ITEM_MESHES 목록대로 한꺼번에
+    t.import_items('C:/경로/FabItems')                   Fab에서 받은 zip/fbx/glb를 번호대로 가져와 테이블에 넣음
+                                  (폴더 안 파일·폴더 이름이 01_셔츠, 02_신발 ... 처럼 번호로 시작해야 함. 번호 = Item_01 ...)
     t.remove_test_items()         테스트 물건 지우기
 스크립트를 고친 뒤에는  import importlib; importlib.reload(t)
 
@@ -524,12 +526,140 @@ def set_item_meshes(mapping):
         done += 1
     out = io.StringIO()
     csv.writer(out, lineterminator='\n').writerows(rows)
-    with unreal.ScopedEditorTransaction('Tag set item meshes'):
-        ok = unreal.DataTableFunctionLibrary.fill_data_table_from_csv_string(dt, out.getvalue())
+    # 되돌리기(트랜잭션)로 감싸면 테이블을 비우는 순간이 기록되며 'Missing RowStruct' 오류가 찍혀서 감싸지 않음
+    ok = unreal.DataTableFunctionLibrary.fill_data_table_from_csv_string(dt, out.getvalue())
     if ok:
         unreal.EditorAssetLibrary.save_loaded_asset(dt)
     unreal.log('[TagSetup] Set %d item meshes (%s). Missing assets: %s'
                % (done, 'saved' if ok else 'FAILED to write table', ', '.join(missing) or 'none'))
+
+
+def import_items(folder, dest='/Game/Items/Fab', only=None, combine=True):
+    """Fab에서 받은 모델을 번호대로 가져와서 DT_ItemSizeData의 Item_번호 행에 넣음
+    folder 안의 파일이나 폴더 이름이 숫자로 시작하면 그 숫자 = 행 번호 (01_셔츠.zip, 2_신발, 30 강아지.fbx ...)
+    zip이면 풀어서 그 안의 fbx(없으면 glb/gltf/obj)를 가져옴. 메시가 여러 개면 가장 큰 것을 씀
+    only=[1, 5] 처럼 주면 그 번호만
+    combine=True: 모델 안 부품을 메시 하나로 합침 (TV, 자전거처럼 한 물건). 여러 물건이 든 팩(셔츠 팩 등)은 combine=False로 → 가장 큰 하나만 씀"""
+    import re, zipfile, shutil, tempfile
+    exts = ('.fbx', '.glb', '.gltf', '.obj')
+    if not os.path.isdir(folder):
+        unreal.log_error('[TagSetup] Folder not found: %s' % folder)
+        return
+    work = os.path.join(tempfile.gettempdir(), 'tag_fab_import')
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+
+    # 번호별로 모델 파일 찾기
+    found = {}
+    for name in sorted(os.listdir(folder)):
+        m = re.match(r'^\s*(\d+)', name)
+        if not m:
+            continue
+        num = int(m.group(1))
+        if only and num not in only:
+            continue
+        path = os.path.join(folder, name)
+        src = path
+        if name.lower().endswith('.zip'):
+            src = os.path.join(work, '%02d' % num)
+            with zipfile.ZipFile(path) as z:
+                z.extractall(src)
+        files = []
+        if os.path.isdir(src):
+            for root, _, fs in os.walk(src):
+                files += [os.path.join(root, f) for f in fs if f.lower().endswith(exts)]
+        elif src.lower().endswith(exts):
+            files = [src]
+        if not files:
+            unreal.log_warning('[TagSetup] #%d %s: no fbx/glb/gltf/obj inside' % (num, name))
+            continue
+        # 애니메이션 파일은 빼고, 이름에 mesh/SK_/SM_이 있는 파일을 먼저, 그다음 형식(fbx>glb>gltf>obj), 큰 파일 순
+        def rank(f):
+            low = f.lower().replace('\\', '/')
+            is_anim = '/anim' in low or 'animation' in low
+            is_mesh = '/mesh' in low or '/sk_' in low or '/sm_' in low or os.path.basename(low).startswith(('sk_', 'sm_'))
+            return (is_anim, not is_mesh, exts.index(os.path.splitext(f)[1].lower()), -os.path.getsize(f))
+        files.sort(key=rank)
+        found[num] = files[0]
+
+    if not found:
+        unreal.log_error('[TagSetup] No numbered model files in %s' % folder)
+        return
+
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    mapping = {}
+
+    # glb/gltf는 Interchange로 들어오는데, 기본값이면 부품마다 메시가 따로 생겨서(TV 뒷판만, 자전거 핸들만 ...)
+    # 이번 가져오기 동안만 '메시 합치기'를 켬 (엔진 기본 파이프라인을 메모리에서만 바꾸고 끝나면 되돌림, 저장 안 함)
+    restore = []
+    for pp in ('/Interchange/Pipelines/DefaultAssetsPipeline', '/Interchange/Pipelines/DefaultGLTFAssetsPipeline'):
+        try:
+            pl = unreal.load_asset(pp)
+            mp = pl.get_editor_property('mesh_pipeline') if pl else None
+            if mp is not None:
+                # UE 5.8: bool(combine_static_meshes)은 안 쓰이고 enum(combine_static_meshes_behavior)으로 바뀜
+                try:
+                    cur = mp.get_editor_property('combine_static_meshes_behavior')
+                    names = [n for n in dir(type(cur)) if n.isupper()]
+                    want = [n for n in names if ('ALL' in n or 'COMBINE' in n) and 'NO' not in n and 'DONT' not in n] if combine \
+                        else [n for n in names if 'NONE' in n or 'DONT' in n or 'NOT' in n or n.startswith('NO')]
+                    if want:
+                        restore.append((mp, 'combine_static_meshes_behavior', cur))
+                        mp.set_editor_property('combine_static_meshes_behavior', getattr(type(cur), want[0]))
+                        unreal.log('[TagSetup] %s: combine behavior -> %s (options %s)' % (pp.rsplit('/', 1)[-1], want[0], names))
+                    else:
+                        unreal.log_warning('[TagSetup] combine behavior options not recognized: %s' % names)
+                except Exception:
+                    restore.append((mp, 'combine_static_meshes', mp.get_editor_property('combine_static_meshes')))
+                    mp.set_editor_property('combine_static_meshes', bool(combine))
+        except Exception as e:
+            unreal.log_warning('[TagSetup] Could not set combine on %s: %s' % (pp, e))
+    for num, f in sorted(found.items()):
+        row = 'Item_%02d' % num
+        # 팩을 나눠 가져올 때는 새 폴더에 (예전에 합쳐 가져온 큰 메시가 같은 폴더에 남아 있으면 그걸 고르게 되므로)
+        target = '%s/%s' % (dest, row) if combine else '%s/%s_parts' % (dest, row)
+        task = unreal.AssetImportTask()
+        task.filename = f
+        task.destination_path = target
+        task.automated = True
+        task.replace_existing = True
+        task.save = True
+        if f.lower().endswith('.fbx'):
+            ui = unreal.FbxImportUI()
+            ui.import_mesh = True
+            ui.import_as_skeletal = False
+            ui.import_materials = True
+            ui.import_textures = True
+            ui.import_animations = False
+            ui.static_mesh_import_data.combine_meshes = bool(combine)
+            task.options = ui
+        tools.import_asset_tasks([task])
+
+        # 가져온 것 중 가장 큰 Static Mesh
+        best, best_size = None, -1.0
+        for p in unreal.EditorAssetLibrary.list_assets(target, recursive=True):
+            a = unreal.EditorAssetLibrary.load_asset(p.split('.')[0])
+            if isinstance(a, unreal.StaticMesh):
+                b = a.get_bounding_box()
+                size = (b.max - b.min).length()
+                if size > best_size:
+                    best, best_size = a.get_path_name().split('.')[0], size
+        if best:
+            mapping[row] = best
+            unreal.log('[TagSetup] #%d -> %s (%s)' % (num, best, os.path.basename(f)))
+        else:
+            unreal.log_warning('[TagSetup] #%d %s: imported but no static mesh found (skeletal?)' % (num, os.path.basename(f)))
+
+    for mp, prop, old in restore:
+        try:
+            mp.set_editor_property(prop, old)
+        except Exception:
+            pass
+
+    if mapping:
+        set_item_meshes(mapping)
+    unreal.log('[TagSetup] Imported %d of %d numbered models. Missing numbers: %s'
+               % (len(mapping), len(found), ', '.join(str(n) for n in range(1, 31) if n not in found and (not only or n in only)) or 'none'))
 
 
 def remove_spawn():
