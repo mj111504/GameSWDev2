@@ -67,10 +67,14 @@ static FBox GetZoneBox(const AActor* Zone)
 // 물건에 진짜 메시가 생기면(또는 Tag.ItemPlaceholder 0) 다음 갱신 때 바로 떼어 냄
 static const FName PlaceholderTag(TEXT("TagPlaceholder"));
 
-// 소형 25cm, 중형 40cm, 대형 60cm, 초대형 90cm (가장 긴 변 기준)
+// 물건 크기 배율. 기본 3 (소형 75cm, 중형 120cm, 대형 180cm, 초대형 270cm, 가장 긴 변 기준)
+static TAutoConsoleVariable<float> CVarItemSizeScale(
+	TEXT("Tag.ItemSizeScale"), 3.f, TEXT("Item size multiplier. Base sizes (longest side): small 25, medium 40, large 60, extra large 90 cm"));
+
 static float ItemSideByWeight(int32 W)
 {
-	return W >= 10 ? 90.f : (W >= 6 ? 60.f : (W >= 3 ? 40.f : 25.f));
+	const float Base = W >= 10 ? 90.f : (W >= 6 ? 60.f : (W >= 3 ? 40.f : 25.f));
+	return Base * FMath::Max(0.1f, CVarItemSizeScale.GetValueOnGameThread());
 }
 
 // 진짜 메시 크기 맞추기: 데이터 테이블 메시는 실제 크기라(자동차·비행기는 몇 m) 쥐가 들 수 있게
@@ -83,20 +87,33 @@ static void FitItemMesh(APickupItem* Item, UStaticMeshComponent* M)
 	if (CVarItemAutoScale.GetValueOnGameThread() == 0) return;
 	UStaticMesh* Mesh = M->GetStaticMesh();
 	// 이미 이 메시로 맞췄으면 건너뜀 (태그에 메시 이름을 같이 적어 둠)
-	const FName Key(*FString::Printf(TEXT("TagFitted_%s"), *Mesh->GetName()));
+	const float Side = ItemSideByWeight(Item->ItemInfo.Weight);
+	const FName Key(*FString::Printf(TEXT("TagFitted_%s_%.0f"), *Mesh->GetName(), Side));   // 크기 배율을 바꾸면 다시 맞춤
 	if (M->ComponentHasTag(Key)) return;
 	M->ComponentTags.RemoveAll([](const FName& T) { return T.ToString().StartsWith(TEXT("TagFitted")); });
 
 	const FVector Size = Mesh->GetBounds().BoxExtent * 2.f;
 	const float Longest = FMath::Max3(Size.X, Size.Y, Size.Z);
 	if (Longest < 1.f) return;
-	const float Scale = ItemSideByWeight(Item->ItemInfo.Weight) / Longest;
+	const float Scale = Side / Longest;
 	M->SetRelativeScale3D(FVector(Scale));
 	// 메시 가운데가 물건 중심(충돌 구)에 오게
 	M->SetRelativeLocation(-Mesh->GetBounds().Origin * Scale);
 	M->ComponentTags.Add(Key);
 	UE_LOG(LogTemp, Log, TEXT("[TagAI] Fitted %s mesh %s: %.0f cm -> %.0f cm"),
 		*Item->ItemInfo.ItemName, *Mesh->GetName(), Longest, Longest * Scale);
+
+	// 메시·크기를 바꾸면 물리 바디가 새로 만들어지면서 공중에 멈춘 채(잠든 상태/물리 꺼진 상태) 남을 수 있음.
+	// BP에서 물리를 켜 두기로 한 컴포넌트(bSimulatePhysics 체크)만 다시 켜고 깨워서 바로 떨어지게 함.
+	// 들고 있는 동안은 BP가 물리를 꺼 두므로(체크 해제) 건드리지 않음
+	TInlineComponentArray<UPrimitiveComponent*> Prims(Item);
+	for (UPrimitiveComponent* P : Prims)
+	{
+		if (!P->BodyInstance.bSimulatePhysics || P->GetCollisionEnabled() == ECollisionEnabled::NoCollision) continue;
+		if (!P->IsSimulatingPhysics()) P->SetSimulatePhysics(true);
+		P->WakeAllRigidBodies();
+		UE_LOG(LogTemp, Log, TEXT("[TagAI] Woke physics on %s (%s)"), *Item->ItemInfo.ItemName, *P->GetName());
+	}
 }
 
 // ---------- 물건 이름표 (패키징한 게임에서도 보임) ----------
@@ -150,16 +167,95 @@ static void UpdateItemLabel(APickupItem* Item, UClass* LabelClass, const FColor&
 	}
 }
 
-static void UpdatePlaceholder(APickupItem* Item, bool bHeld)
+// 들고 있는 동안 물건이 들고 있는 캐릭터를 밀어내지 않게: 큰 물건(호박 등)은 캡슐과 겹쳐서
+// 캐릭터를 뒤로 밀어버림. 들고 있을 때만 Pawn·Camera 충돌을 끄고, 내려놓으면 원래대로 돌려놓음
+static const FName HeldCollisionTag(TEXT("TagHeldNoPawn"));
+
+static void SetHeldCollision(APickupItem* Item, bool bHeld)
 {
+	TInlineComponentArray<UPrimitiveComponent*> Prims(Item);
+	for (UPrimitiveComponent* P : Prims)
+	{
+		if (P->IsA<UWidgetComponent>()) continue;
+		const bool bOff = P->ComponentHasTag(HeldCollisionTag);
+		if (bHeld && !bOff)
+		{
+			// 원래 반응을 태그에 적어 둠 (0 Ignore, 1 Overlap, 2 Block)
+			P->ComponentTags.Add(HeldCollisionTag);
+			P->ComponentTags.Add(FName(*FString::Printf(TEXT("TagOrigPawn_%d"), (int32)P->GetCollisionResponseToChannel(ECC_Pawn))));
+			P->ComponentTags.Add(FName(*FString::Printf(TEXT("TagOrigCam_%d"), (int32)P->GetCollisionResponseToChannel(ECC_Camera))));
+			P->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+			P->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+		}
+		else if (!bHeld && bOff)
+		{
+			for (const FName& T : P->ComponentTags)
+			{
+				const FString S = T.ToString();
+				if (S.StartsWith(TEXT("TagOrigPawn_")))
+					P->SetCollisionResponseToChannel(ECC_Pawn, (ECollisionResponse)FCString::Atoi(*S.RightChop(12)));
+				else if (S.StartsWith(TEXT("TagOrigCam_")))
+					P->SetCollisionResponseToChannel(ECC_Camera, (ECollisionResponse)FCString::Atoi(*S.RightChop(11)));
+			}
+			P->ComponentTags.RemoveAll([](const FName& T)
+			{
+				const FString S = T.ToString();
+				return T == HeldCollisionTag || S.StartsWith(TEXT("TagOrigPawn_")) || S.StartsWith(TEXT("TagOrigCam_"));
+			});
+		}
+	}
+}
+
+// 들고 있을 때 물건을 몸 앞으로 띄워 줌: 크기를 키운 큰 물건(게이밍 의자 등)은 들기 위치가 그대로라
+// 캐릭터 몸과 겹쳐 보임. 물건 앞뒤 길이의 절반 + 캡슐 반지름 + 여유만큼 캐릭터 앞쪽으로 메시를 옮김.
+// 내려놓으면 원래 자리(크기 맞출 때 정한 위치)로 되돌림. Tag.HoldGap 으로 여유 조절
+static TAutoConsoleVariable<float> CVarHoldGap(
+	TEXT("Tag.HoldGap"), 15.f, TEXT("Gap (cm) between a carrying character's capsule and the near side of the item it holds"));
+
+static void UpdateHoldOffset(APickupItem* Item, UStaticMeshComponent* M, APawn* Holder)
+{
+	if (CVarItemAutoScale.GetValueOnGameThread() == 0) return;
+	UStaticMesh* Mesh = M->GetStaticMesh();
+	if (!Mesh || M == Item->GetRootComponent() || !M->GetAttachParent()) return;
+	const float Scale = M->GetRelativeScale3D().X;
+	const FVector BaseRel = -Mesh->GetBounds().Origin * Scale;   // FitItemMesh에서 정한 원래 위치
+
+	if (!Holder)
+	{
+		if (!M->GetRelativeLocation().Equals(BaseRel, 0.5f)) M->SetRelativeLocation(BaseRel);
+		return;
+	}
+
+	float Radius = 35.f;
+	if (const ACharacter* Ch = Cast<ACharacter>(Holder)) Radius = Ch->GetCapsuleComponent()->GetScaledCapsuleRadius();
+	const FVector Ext = Mesh->GetBounds().BoxExtent * Scale;
+	const float HalfDepth = FMath::Max(Ext.X, Ext.Y);
+	const float Need = Radius + HalfDepth + CVarHoldGap.GetValueOnGameThread();
+
+	const FVector Fwd = Holder->GetActorForwardVector().GetSafeNormal2D();
+	const FVector RootPos = M->GetAttachParent()->GetComponentLocation();
+	const float Have = FVector::DotProduct(RootPos - Holder->GetActorLocation(), Fwd);
+	const float Extra = FMath::Max(0.f, Need - Have);
+
+	// 원래 위치 + 캐릭터 앞쪽으로 Extra (부모 좌표계로 바꿔서 넣음)
+	const FTransform ParentT = M->GetAttachParent()->GetComponentTransform();
+	const FVector BaseWorld = ParentT.TransformPosition(BaseRel);
+	const FVector NewRel = ParentT.InverseTransformPosition(BaseWorld + Fwd * Extra);
+	if (!M->GetRelativeLocation().Equals(NewRel, 0.5f)) M->SetRelativeLocation(NewRel);
+}
+
+static void UpdatePlaceholder(APickupItem* Item, APawn* Holder)
+{
+	const bool bHeld = Holder != nullptr;
 	UStaticMeshComponent* Placeholder = nullptr;
 	bool bHasRealMesh = false;
 	TInlineComponentArray<UStaticMeshComponent*> Meshes(Item);
 	for (UStaticMeshComponent* M : Meshes)
 	{
 		if (M->ComponentHasTag(PlaceholderTag)) Placeholder = M;
-		else if (M->GetStaticMesh()) { bHasRealMesh = true; FitItemMesh(Item, M); }
+		else if (M->GetStaticMesh()) { bHasRealMesh = true; FitItemMesh(Item, M); UpdateHoldOffset(Item, M, Holder); }
 	}
+	SetHeldCollision(Item, bHeld);
 
 	const bool bWant = CVarItemPlaceholder.GetValueOnGameThread() != 0 && !bHasRealMesh;
 	if (!bWant)
@@ -549,7 +645,7 @@ void UTagAgentSubsystem::UpdateItems()
 		E.Holder = Holder;
 		if (Holder) E.LastHolder = Holder;
 
-		UpdatePlaceholder(Item, Holder != nullptr);
+		UpdatePlaceholder(Item, Holder);
 
 		// 이름표 위젯 (게임용). 흰색 = 바닥, 노랑 = 누가 들고 있음, 하늘색 = 반출됨
 		{

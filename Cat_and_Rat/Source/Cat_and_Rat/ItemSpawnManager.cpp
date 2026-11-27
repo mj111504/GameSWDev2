@@ -1,4 +1,4 @@
-#include "ItemSpawnManager.h"
+﻿#include "ItemSpawnManager.h"
 #include "Kismet/GameplayStatics.h"
 
 AItemSpawnManager::AItemSpawnManager()
@@ -67,8 +67,27 @@ void AItemSpawnManager::SpawnAllItems()
 	if (!ItemDataTable || !PickupItemClass) return;
 
 	// 1. 데이터 테이블의 모든 행을 크기 등급별(0~3) 버킷으로 분류
+	//    메시(ItemMesh)가 아직 없는 행은 빼서 아예 안 나오게 함 (메시를 넣으면 자동으로 다시 나옴)
 	TArray<FName> ItemBuckets[4];
-	TArray<FName> AllRowNames = ItemDataTable->GetRowNames();
+	TArray<FName> AllRowNames;
+	int32 SkippedNoMesh = 0;
+	{
+		static const FString MeshContext(TEXT("ItemSpawnManager_MeshCheck"));
+		for (const FName& RowName : ItemDataTable->GetRowNames())
+		{
+			const FItemSizeData* Row = ItemDataTable->FindRow<FItemSizeData>(RowName, MeshContext);
+			if (!Row || !Row->ItemMesh)
+			{
+				++SkippedNoMesh;
+				continue;
+			}
+			AllRowNames.Add(RowName);
+		}
+	}
+	if (SkippedNoMesh > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[ItemSpawnManager] 메시가 없는 행 %d개는 스폰에서 제외"), SkippedNoMesh);
+	}
 	if (AllRowNames.Num() == 0) return;
 
 	for (const FName& RowName : AllRowNames)
