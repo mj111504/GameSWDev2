@@ -94,6 +94,12 @@ private:
 	TArray<float> CarryDist;
 	TArray<int32> Nbs;
 
+	// 운반 중 제자리 감지: 1.5초 동안 50cm도 못 움직이면 격자 경로 대신 NavMesh에 반출구역까지 길을 맡김
+	FVector CarryCheckPos = FVector::ZeroVector;
+	float CarryCheckTime = -1.f;
+	float CarryDirectUntil = -1.f;
+	float CarryLastTick = -1.f;   // 운반을 잠깐 멈췄다 다시 시작하면 제자리 검사를 새로 시작
+
 	// Think 한 번 동안 쓰는 값
 	float Cs = 35.f;
 	float MySpeed = 1.f;

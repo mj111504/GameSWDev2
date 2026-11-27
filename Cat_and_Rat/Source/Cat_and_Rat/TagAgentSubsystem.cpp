@@ -33,7 +33,9 @@ static TAutoConsoleVariable<float> CVarRecoverRadius(
 static TAutoConsoleVariable<float> CVarRecoverScoreRatio(
 	TEXT("Tag.RecoverScoreRatio"), 0.5f, TEXT("Cat score for returning an item = item score x this ratio"));
 static TAutoConsoleVariable<float> CVarMessWinPercent(
-	TEXT("Tag.MessWinPercent"), 80.f, TEXT("Rats win when messiness goes over this percent"));
+	TEXT("Tag.MessWinPercent"), 50.f, TEXT("Rats win when messiness goes over this percent"));
+static TAutoConsoleVariable<float> CVarMessMultiplier(
+	TEXT("Tag.MessMultiplier"), 2.f, TEXT("Messiness each exported item adds = its share of total weight x this (1 = plain share). Capped at 100%"));
 static TAutoConsoleVariable<float> CVarRespawnSeconds(
 	TEXT("Tag.RespawnSeconds"), 5.f, TEXT("Seconds a caught rat waits before respawning in the export zone farthest from the cats. Negative = never respawn"));
 static TAutoConsoleVariable<int32> CVarRatLives(
@@ -556,7 +558,9 @@ float UTagAgentSubsystem::GetMessinessPercent() const
 	{
 		if (const APickupItem* Item = E.Item.Get()) TotalWeight += Item->ItemInfo.Weight;
 	}
-	return TotalWeight > 0 ? 100.f * MessWeight / TotalWeight : 0.f;
+	// 물건 하나가 올리는 수치 = (무게 ÷ 전체 무게) × 배수. 배수 2면 무게 6짜리(전체 67)가 9.0% → 17.9%. 100%를 넘지 않음
+	const float Mult = FMath::Max(0.f, CVarMessMultiplier.GetValueOnGameThread());
+	return TotalWeight > 0 ? FMath::Min(100.f, 100.f * MessWeight / TotalWeight * Mult) : 0.f;
 }
 
 bool UTagAgentSubsystem::ReserveItem(APickupItem* Item, APawn* Rat)

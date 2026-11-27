@@ -551,7 +551,8 @@ void ATagRatAIController::Carry(UTagGridSubsystem* Grid, UTagAgentSubsystem* Age
 			{
 				if (CarryDist[Nb] < PrevDist) { PrevDist = CarryDist[Nb]; Prev = Nb; }
 			}
-			if (Prev == INDEX_NONE) break;
+			// 거리가 줄어드는 이웃이 없으면 멈춤 (한쪽으로만 이어진 칸에서 두 칸을 왔다 갔다 하는 것 방지)
+			if (Prev == INDEX_NONE || PrevDist >= CarryDist[Cur]) break;
 			Cur = Prev;
 		}
 		// Path는 목표 → 쥐 순서. 쥐에서 8칸 앞 지점을 다음 목적지로 삼음
@@ -569,8 +570,32 @@ void ATagRatAIController::Carry(UTagGridSubsystem* Grid, UTagAgentSubsystem* Age
 		}
 	}
 
+	// 제자리 감지: 1.5초 동안 50cm도 못 움직였으면 3초 동안 반출구역 칸으로 NavMesh 길찾기에 직접 맡김
+	// (격자 경로의 중간 지점이 계단 위아래·다른 층으로 잡혀 NavMesh가 거기까지 못 가는 경우 대비)
+	const float Now = GetWorld()->GetTimeSeconds();
+	const bool bResumed = (Now - CarryLastTick) > 0.6f;   // 운반 판단은 0.25초마다라, 그보다 오래 비었으면 새로 시작
+	CarryLastTick = Now;
+	if (bResumed || CarryCheckTime < 0.f || FVector::Dist(MyPos, CarryCheckPos) > 50.f)
+	{
+		CarryCheckPos = MyPos;
+		CarryCheckTime = Now;
+	}
+	else if (Now - CarryCheckTime > 1.5f && Now >= CarryDirectUntil)
+	{
+		const int32 DirectCell = (Target != INDEX_NONE) ? Target : ExportCells[0];
+		UE_LOG(LogTemp, Warning, TEXT("[TagAI] %s carry stuck %.1f s: cell %d, target %d, goal %.0f cm away. Using direct NavMesh path"),
+			*Me->GetName(), Now - CarryCheckTime, MyCell, DirectCell, FVector::Dist(MyPos, Goal));
+		CarryDirectUntil = Now + 3.f;
+		CarryCheckPos = MyPos;
+		CarryCheckTime = Now;
+	}
+	if (Now < CarryDirectUntil)
+	{
+		Goal = Grid->CellToWorld((Target != INDEX_NONE) ? Target : ExportCells[0]);
+	}
+
 	MoveToLocation(Goal, 30.f, false, true, false, true, nullptr, true);
-	if (bDebug) DrawDebugSphere(GetWorld(), Goal, 40.f, 8, FColor::Blue, false, 0.3f);
+	if (bDebug) DrawDebugSphere(GetWorld(), Goal, 40.f, 8, Now < CarryDirectUntil ? FColor::Orange : FColor::Blue, false, 0.3f);
 }
 
 // ======================== 넘기기 ========================
