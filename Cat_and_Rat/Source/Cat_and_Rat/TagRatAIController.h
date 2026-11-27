@@ -99,6 +99,7 @@ private:
 	float CarryCheckTime = -1.f;
 	float CarryDirectUntil = -1.f;
 	float CarryLastTick = -1.f;
+	float NoItemLogTime = -100.f;   // '주울 물건 없음' 로그를 3초에 한 번만
 	int32 CarryStuckCount = 0;    // 연속으로 막힌 횟수. 1번째: 가까운 칸 직접, 2번째: 구역 한가운데 칸, 3번째부터: 같은 구역의 다른 칸 아무거나
 	int32 CarryDirectCell = INDEX_NONE;   // 운반을 잠깐 멈췄다 다시 시작하면 제자리 검사를 새로 시작
 

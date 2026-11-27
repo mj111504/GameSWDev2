@@ -397,16 +397,18 @@ bool ATagRatAIController::GoToItem(UTagGridSubsystem* Grid, UTagAgentSubsystem* 
 	float CurrentValue = 0.f;   // 지금 가지러 가는 물건의 값 (목표를 너무 자주 바꾸지 않게)
 	int32 CurrentCell = INDEX_NONE;
 
+	// 왜 고를 물건이 없는지 세어 둠 (로그용)
+	int32 NDone = 0, NHeavy = 0, NReserved = 0, NUnreachable = 0, NCatFirst = 0;
 	for (const FTagItemEntry& E : Agents->GetItems())
 	{
 		APickupItem* Item = E.Item.Get();
-		if (!Item || E.bExported || E.Holder.IsValid()) continue;
-		if (Item->ItemInfo.Weight > MaxWeight) continue;
-		if (E.ReservedBy.IsValid() && E.ReservedBy.Get() != Me && Agents->IsRatAlive(E.ReservedBy.Get())) continue;
+		if (!Item || E.bExported || E.Holder.IsValid()) { ++NDone; continue; }
+		if (Item->ItemInfo.Weight > MaxWeight) { ++NHeavy; continue; }
+		if (E.ReservedBy.IsValid() && E.ReservedBy.Get() != Me && Agents->IsRatAlive(E.ReservedBy.Get())) { ++NReserved; continue; }
 		if (Item == StashedItem.Get() && GetWorld()->GetTimeSeconds() < StashUntil) continue;   // 방금 숨긴 물건
 
 		const int32 ItemCell = Grid->FindNearestWalkableCell(Item->GetActorLocation());
-		if (ItemCell == INDEX_NONE || RatDist[ItemCell] < 0 || ExportDist[ItemCell] < 0) continue;
+		if (ItemCell == INDEX_NONE || RatDist[ItemCell] < 0 || ExportDist[ItemCell] < 0) { ++NUnreachable; continue; }
 
 		// 걸리는 시간: 물건까지 (빈손 속도) + 물건에서 반출구역까지 (들었을 때 느려진 속도)
 		const float TimeTo = RatDist[ItemCell] * Cs / MySpeed;
@@ -415,7 +417,7 @@ bool ATagRatAIController::GoToItem(UTagGridSubsystem* Grid, UTagAgentSubsystem* 
 
 		// 고양이가 쥐보다 먼저 그 물건에 도착하면 뺌
 		const float CatTime = CatCellsTo(Grid, ItemCell) * Cs / CatSpeed;
-		if (CatTime <= TimeTo) continue;
+		if (CatTime <= TimeTo) { ++NCatFirst; continue; }
 
 		float Value = UTagAgentSubsystem::GetItemScore(Item->ItemInfo.Weight) / FMath::Max(0.1f, TimeTo + TimeCarry);
 		if (E.ReservedBy.Get() == Me) Value *= 2.f;   // 숨겨 둔 물건, 넘겨받은 물건 우선
@@ -434,6 +436,13 @@ bool ATagRatAIController::GoToItem(UTagGridSubsystem* Grid, UTagAgentSubsystem* 
 	{
 		if (TargetItem.IsValid()) ReleaseMine(Agents);
 		TargetItem = nullptr;
+		const float Now = GetWorld()->GetTimeSeconds();
+		if (Now - NoItemLogTime > 3.f)
+		{
+			NoItemLogTime = Now;
+			UE_LOG(LogTemp, Log, TEXT("[TagAI] %s has no item to steal (cell %d): exported/held %d, too heavy %d, reserved %d, unreachable %d, cat gets there first %d"),
+				*Me->GetName(), Grid->FindNearestWalkableCell(Me->GetActorLocation()), NDone, NHeavy, NReserved, NUnreachable, NCatFirst);
+		}
 		return false;
 	}
 

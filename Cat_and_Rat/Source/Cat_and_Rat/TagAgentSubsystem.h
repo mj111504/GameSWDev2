@@ -99,6 +99,14 @@ public:
 	int32 CountRecoveringCats(const APawn* Except) const;
 	const FTagItemEntry* FindEntry(const APickupItem* Item) const;
 
+	// 로비 버튼용: 플레이어와 같이 뛰는 AI 쥐 수 (0~5, 0 = 플레이어 혼자). 맵을 옮겨도 값이 남음.
+	// 아직 안 골랐으면 DefaultGame.ini [TagLayout] DefaultAIRats (없으면 2)
+	UFUNCTION(BlueprintCallable, Category = "TagAI")
+	static void SetAIRatCount(int32 Count);
+
+	UFUNCTION(BlueprintPure, Category = "TagAI")
+	static int32 GetAIRatCount();
+
 	// 기획서 점수: 소형(1) 5점, 중형(3) 15점, 대형(6) 30점, 초대형(10) 50점
 	static int32 GetItemScore(int32 Weight);
 	// 팀원 InteractionComponent와 같은 표: 1 → 100%, 3 → 75%, 6 → 50%, 10 → 30%
@@ -145,7 +153,9 @@ private:
 	bool ChooseRespawnPoint(FVector& OutPos) const;   // 반출구역 중 고양이에게서 걸어서 가장 먼 구역 안 랜덤 위치
 	void CatsWin(const FString& Reason);
 	void UpdateItems();          // 0.25초마다 물건 목록·들고 있는 사람·반출 여부 갱신
-	void SpawnLayout(UWorld& World);   // 맵에 반출구역·슬롯·스폰 매니저가 없으면 DefaultGame.ini [TagLayout] 좌표대로 생성
+	bool IsLayoutMap(UWorld& World) const;   // DefaultGame.ini [TagLayout] Map과 같은 맵인지
+	void SpawnLayout(UWorld& World);
+	void AdjustAIRats(UWorld& World);   // Tag.AIRats 수에 맞게 AI 쥐를 더 만들거나 지움   // 맵에 반출구역·슬롯·스폰 매니저가 없으면 DefaultGame.ini [TagLayout] 좌표대로 생성
 	void FindExportZones();
 	void ExportItem(FTagItemEntry& Entry);
 	void RecoverItem(FTagItemEntry& Entry);

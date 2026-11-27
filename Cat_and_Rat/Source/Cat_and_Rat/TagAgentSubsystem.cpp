@@ -25,6 +25,8 @@
 #include "Misc/ConfigCacheIni.h"
 #include "ItemSpawnManager.h"
 #include "SpawnSlotBox.h"
+#include "GameFramework/PlayerStart.h"
+#include "GameFramework/Controller.h"
 
 static TAutoConsoleVariable<int32> CVarPlayerIsRat(
 	TEXT("Tag.PlayerIsRat"), 1, TEXT("1 = the player-controlled character joins as a rat, 0 = it is ignored by the cats"));
@@ -34,6 +36,8 @@ static TAutoConsoleVariable<float> CVarRecoverScoreRatio(
 	TEXT("Tag.RecoverScoreRatio"), 0.5f, TEXT("Cat score for returning an item = item score x this ratio"));
 static TAutoConsoleVariable<float> CVarMessWinPercent(
 	TEXT("Tag.MessWinPercent"), 65.f, TEXT("Rats win when messiness goes over this percent"));
+static TAutoConsoleVariable<int32> CVarAIRats(
+	TEXT("Tag.AIRats"), -1, TEXT("AI rats that play with the player (0-5). Spawned or removed to match at game start. -1 = not chosen yet, use DefaultAIRats in DefaultGame.ini [TagLayout] (2 if missing)"));
 static TAutoConsoleVariable<float> CVarMessMultiplier(
 	TEXT("Tag.MessMultiplier"), 2.f, TEXT("Messiness each exported item adds = its share of total weight x this (1 = plain share). Capped at 100%"));
 static TAutoConsoleVariable<float> CVarRespawnSeconds(
@@ -115,6 +119,7 @@ void UTagAgentSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		FTimerDelegate::CreateUObject(this, &UTagAgentSubsystem::RegisterPlayers), 0.5f, true);
 
 	SpawnLayout(InWorld);   // 반출구역을 먼저 만들어야 아래에서 찾음
+	AdjustAIRats(InWorld);  // 로비에서 고른 AI 쥐 수 맞추기
 	FindExportZones();
 	UpdateItems();
 	InWorld.GetTimerManager().SetTimer(ItemScanHandle,
@@ -648,12 +653,18 @@ static bool ParseNumbers(const FString& Text, int32 First, int32 Want, TArray<fl
 	return true;
 }
 
-void UTagAgentSubsystem::SpawnLayout(UWorld& World)
+bool UTagAgentSubsystem::IsLayoutMap(UWorld& World) const
 {
 	FString Map;
 	GConfig->GetString(LayoutSection, TEXT("Map"), Map, GGameIni);
 	const FString Current = UGameplayStatics::GetCurrentLevelName(&World, true);   // PIE 접두어 뺀 맵 이름
-	if (Map.IsEmpty() || !Current.Equals(Map, ESearchCase::IgnoreCase)) return;   // 로비 등 다른 맵이면 아무것도 안 함
+	return !Map.IsEmpty() && Current.Equals(Map, ESearchCase::IgnoreCase);
+}
+
+void UTagAgentSubsystem::SpawnLayout(UWorld& World)
+{
+	if (!IsLayoutMap(World)) return;   // 로비 등 다른 맵이면 아무것도 안 함
+	const FString Current = UGameplayStatics::GetCurrentLevelName(&World, true);
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -734,6 +745,98 @@ void UTagAgentSubsystem::SpawnLayout(UWorld& World)
 	UE_LOG(LogTemp, Log, TEXT("[TagLayout] %s: spawned %d export zones, %d slots, %s spawn manager (already in level: zones %s, slots %d, managers %d)"),
 		*Current, NumZones, NumSlots, bMadeManager ? TEXT("1") : TEXT("0"),
 		bHasZone ? TEXT("yes") : TEXT("no"), Found.Num(), Managers.Num());
+}
+
+// ======================== AI 쥐 수 (로비 버튼) ========================
+// 로비에서 SetAIRatCount(n)를 부르면 콘솔 변수 Tag.AIRats에 저장됨 → 맵을 옮겨도 남음. n = 플레이어와 같이 뛰는 AI 쥐 수 (0~5).
+// 게임 맵이 시작될 때 AI 쥐(TagRatAIController가 조종하는 쥐)를 세서 모자라면 만들고, 많으면 지움. 플레이어 쥐는 안 셈.
+// 쥐 BP 경로는 DefaultGame.ini [TagLayout] RatClass (Python t.save_layout()이 씀)
+// 플레이어와 같이 뛰는 AI 쥐 수 (0~5). 0이면 플레이어 혼자
+static const int32 MaxAIRats = 5;   // 로비에서 늘릴 수 있는 최대 AI 쥐 수
+void UTagAgentSubsystem::SetAIRatCount(int32 Count)
+{
+	CVarAIRats->Set(FMath::Clamp(Count, 0, MaxAIRats), ECVF_SetByCode);
+}
+
+int32 UTagAgentSubsystem::GetAIRatCount()
+{
+	const int32 V = CVarAIRats.GetValueOnGameThread();
+	if (V >= 0) return FMath::Clamp(V, 0, MaxAIRats);
+	// 로비에서 아직 안 골랐으면 ini 기본값
+	int32 Default = 2;
+	GConfig->GetInt(LayoutSection, TEXT("DefaultAIRats"), Default, GGameIni);
+	return FMath::Clamp(Default, 0, MaxAIRats);
+}
+
+void UTagAgentSubsystem::AdjustAIRats(UWorld& World)
+{
+	if (!IsLayoutMap(World)) return;
+	const int32 Want = GetAIRatCount();   // 0이면 AI 쥐를 전부 지워서 플레이어 혼자
+
+	// 맵에 놓인 AI 쥐 (이 시점에 이미 AI가 붙어 있음)
+	TArray<APawn*> AIRats;
+	for (TActorIterator<APawn> It(&World); It; ++It)
+	{
+		if (Cast<ATagRatAIController>(It->GetController())) AIRats.Add(*It);
+	}
+	const int32 Before = AIRats.Num();
+
+	// 많으면 뒤에서부터 지움
+	while (AIRats.Num() > Want)
+	{
+		APawn* P = AIRats.Pop();
+		if (AController* C = P->GetController()) { C->UnPossess(); C->Destroy(); }
+		UnregisterRat(P);
+		P->Destroy();
+	}
+
+	// 모자라면 만듦: 기존 쥐(없으면 PlayerStart) 근처 4m 안의 걸을 수 있는 바닥
+	int32 Made = 0;
+	if (AIRats.Num() < Want)
+	{
+		FString ClassPath;
+		GConfig->GetString(LayoutSection, TEXT("RatClass"), ClassPath, GGameIni);
+		UClass* RatClass = ClassPath.IsEmpty() ? nullptr : LoadClass<APawn>(nullptr, *ClassPath);
+		if (!RatClass && AIRats.Num() > 0) RatClass = AIRats[0]->GetClass();   // ini에 없으면 맵에 있는 쥐와 같은 BP
+		if (!RatClass)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[TagAI] Can't add AI rats: no RatClass in DefaultGame.ini [TagLayout] and no AI rat in the level"));
+			return;
+		}
+
+		FVector Base = FVector::ZeroVector;
+		if (AIRats.Num() > 0) Base = AIRats[0]->GetActorLocation();
+		else
+		{
+			TActorIterator<APlayerStart> PS(&World);
+			if (PS) Base = PS->GetActorLocation();
+		}
+
+		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(&World);
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+		for (int32 Tries = 0; AIRats.Num() < Want && Tries < Want * 5; ++Tries)
+		{
+			FVector Pos = Base;
+			FNavLocation Nav;
+			if (NavSys && NavSys->GetRandomReachablePointInRadius(Base, 400.f, Nav)) Pos = Nav.Location + FVector(0.f, 0.f, 100.f);
+
+			APawn* Rat = World.SpawnActor<APawn>(RatClass, Pos, FRotator(0.f, FMath::FRandRange(0.f, 360.f), 0.f), Params);
+			if (!Rat) continue;
+			// BP 설정과 상관없이 쥐 AI를 붙임 (BP가 다른 AI를 붙였으면 떼고 교체)
+			if (!Cast<ATagRatAIController>(Rat->GetController()))
+			{
+				if (AController* Old = Rat->GetController()) { Old->UnPossess(); Old->Destroy(); }
+				Rat->AIControllerClass = ATagRatAIController::StaticClass();
+				Rat->SpawnDefaultController();
+			}
+			AIRats.Add(Rat);
+			++Made;
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[TagAI] AI rats: wanted %d, level had %d, spawned %d, now %d"), Want, Before, Made, AIRats.Num());
 }
 
 // ======================== 반출구역 ========================
