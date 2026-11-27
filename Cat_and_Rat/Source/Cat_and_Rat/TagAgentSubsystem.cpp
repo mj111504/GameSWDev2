@@ -2,6 +2,9 @@
 #include "TagGridSubsystem.h"
 #include "PickupItem.h"
 #include "InteractionComponent.h"
+#include "TagRatAIController.h"
+#include "NavigationSystem.h"
+#include "Components/CapsuleComponent.h"
 
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -14,6 +17,8 @@
 #include "EngineUtils.h"
 #include "DrawDebugHelpers.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 
 static TAutoConsoleVariable<int32> CVarPlayerIsRat(
 	TEXT("Tag.PlayerIsRat"), 1, TEXT("1 = the player-controlled character joins as a rat, 0 = it is ignored by the cats"));
@@ -23,6 +28,70 @@ static TAutoConsoleVariable<float> CVarRecoverScoreRatio(
 	TEXT("Tag.RecoverScoreRatio"), 0.5f, TEXT("Cat score for returning an item = item score x this ratio"));
 static TAutoConsoleVariable<float> CVarMessWinPercent(
 	TEXT("Tag.MessWinPercent"), 80.f, TEXT("Rats win when messiness goes over this percent"));
+static TAutoConsoleVariable<float> CVarRespawnSeconds(
+	TEXT("Tag.RespawnSeconds"), 5.f, TEXT("Seconds a caught rat waits before respawning in the export zone farthest from the cats. Negative = never respawn"));
+static TAutoConsoleVariable<int32> CVarRatLives(
+	TEXT("Tag.RatLives"), 0, TEXT("How many times each rat can respawn. 0 = unlimited"));
+static TAutoConsoleVariable<int32> CVarCatchLimit(
+	TEXT("Tag.CatchLimit"), 0, TEXT("Cats win after this many catches in total. 0 = unlimited"));
+static TAutoConsoleVariable<int32> CVarItemPlaceholder(
+	TEXT("Tag.ItemPlaceholder"), 1, TEXT("1 = attach a temporary cube to items that have no mesh yet (removed automatically once a real mesh is set), 0 = off"));
+
+static FBox GetZoneBox(const AActor* Zone)
+{
+	// 충돌 컴포넌트(Trigger Box의 상자) 기준. 충돌이 없는 액터면 전체 모양 기준
+	FVector Center, Extent;
+	Zone->GetActorBounds(true, Center, Extent);
+	if (Extent.IsNearlyZero()) Zone->GetActorBounds(false, Center, Extent);
+	return FBox(Center - Extent, Center + Extent);
+}
+
+// ---------- 테스트용 임시 큐브 ----------
+// 팀원이 물건 메시를 넣기 전까지만 씀. 게임 실행 중에만 붙이므로 BP나 맵에는 저장되지 않음.
+// 물건에 진짜 메시가 생기면(또는 Tag.ItemPlaceholder 0) 다음 갱신 때 바로 떼어 냄
+static const FName PlaceholderTag(TEXT("TagPlaceholder"));
+
+static void UpdatePlaceholder(APickupItem* Item, bool bHeld)
+{
+	UStaticMeshComponent* Placeholder = nullptr;
+	bool bHasRealMesh = false;
+	TInlineComponentArray<UStaticMeshComponent*> Meshes(Item);
+	for (UStaticMeshComponent* M : Meshes)
+	{
+		if (M->ComponentHasTag(PlaceholderTag)) Placeholder = M;
+		else if (M->GetStaticMesh()) bHasRealMesh = true;
+	}
+
+	const bool bWant = CVarItemPlaceholder.GetValueOnGameThread() != 0 && !bHasRealMesh;
+	if (!bWant)
+	{
+		if (Placeholder) Placeholder->DestroyComponent();
+		return;
+	}
+
+	if (!Placeholder)
+	{
+		static UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		if (!Cube || !Item->GetRootComponent()) return;
+		Placeholder = NewObject<UStaticMeshComponent>(Item);
+		Placeholder->ComponentTags.Add(PlaceholderTag);
+		Placeholder->SetStaticMesh(Cube);
+		// 바닥·벽에는 부딪히고(떨어뜨려도 안 뚫림), 조준 레이저에도 맞지만, 캐릭터는 막지 않음
+		Placeholder->SetCollisionProfileName(TEXT("BlockAllDynamic"));
+		Placeholder->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		Placeholder->RegisterComponent();
+		// 용접(weld)해서 붙임: 내려놓을 때 물리가 켜지면 큐브 충돌도 물건 몸체에 포함돼 바닥에 걸림
+		Placeholder->AttachToComponent(Item->GetRootComponent(),
+			FAttachmentTransformRules(EAttachmentRule::SnapToTarget, EAttachmentRule::SnapToTarget, EAttachmentRule::KeepRelative, true));
+		Item->AddInstanceComponent(Placeholder);
+	}
+
+	// 크기: 무게가 클수록 큰 큐브 (소형 25cm, 중형 40cm, 대형 60cm, 초대형 90cm). 무게가 나중에 들어와도 맞춰짐
+	const int32 W = Item->ItemInfo.Weight;
+	const float Side = W >= 10 ? 90.f : (W >= 6 ? 60.f : (W >= 3 ? 40.f : 25.f));
+	Placeholder->SetRelativeScale3D(FVector(Side / 100.f));
+	Placeholder->SetCollisionEnabled(bHeld ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
+}
 
 bool UTagAgentSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
@@ -70,7 +139,18 @@ void UTagAgentSubsystem::HandlePlayerCaught(APawn* Rat)
 	{
 		Ch->GetCharacterMovement()->StopMovementImmediately();
 	}
-	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 10.f, FColor::Red, TEXT("[TagAI] You were caught!"));
+	Rat->SetActorHiddenInGame(true);
+	Rat->SetActorEnableCollision(false);
+
+	// 관전: 살아 있는 다른 쥐를 비춤 (없으면 그 자리 그대로)
+	if (AliveRats.Num() > 0 && AliveRats[0].IsValid())
+	{
+		PC->SetViewTargetWithBlend(AliveRats[0].Get(), 0.5f);
+	}
+	const float Wait = CVarRespawnSeconds.GetValueOnGameThread();
+	const FString Msg = Wait >= 0.f ? FString::Printf(TEXT("[TagAI] You were caught! Respawn in %.0f s"), Wait)
+	                                : FString(TEXT("[TagAI] You were caught!"));
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, FMath::Max(3.f, Wait), FColor::Red, Msg);
 }
 
 float UTagAgentSubsystem::GetElapsedSeconds() const
@@ -137,20 +217,156 @@ bool UTagAgentSubsystem::ReportCaught(APawn* Cat, APawn* Rat)
 	CaughtRats.Add(Rat);
 	ReleaseReservations(Rat);
 	++NumCaught;
+	++CatchCount;
+	const int32 RatDeaths = ++Deaths.FindOrAdd(Rat);
+
+	// 부활할 수 있나: 부활 시간이 0 이상이고, 목숨 제한이 없거나 아직 남았으면
+	const float Wait = CVarRespawnSeconds.GetValueOnGameThread();
+	const int32 Lives = CVarRatLives.GetValueOnGameThread();
+	const bool bRespawn = Wait >= 0.f && (Lives <= 0 || RatDeaths <= Lives);
 
 	const float Elapsed = GetElapsedSeconds();
-	const FString Msg = FString::Printf(TEXT("[TagAI] %s caught %s at %.2f s (%d / %d)"),
-		Cat ? *Cat->GetName() : TEXT("?"), *Rat->GetName(), Elapsed, NumCaught, NumRatsTotal);
+	const FString Msg = FString::Printf(TEXT("[TagAI] %s caught %s at %.2f s (catch #%d, %s)"),
+		Cat ? *Cat->GetName() : TEXT("?"), *Rat->GetName(), Elapsed, CatchCount,
+		bRespawn ? *FString::Printf(TEXT("respawn in %.0f s"), Wait) : TEXT("out"));
 	UE_LOG(LogTemp, Log, TEXT("%s"), *Msg);
 	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 10.f, FColor::Red, Msg);
 
-	if (AliveRats.Num() == 0)
+	if (bRespawn)
 	{
-		const FString Done = FString::Printf(TEXT("[TagAI] All %d rats caught in %.2f s"), NumRatsTotal, Elapsed);
-		UE_LOG(LogTemp, Log, TEXT("%s"), *Done);
-		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Yellow, Done);
+		++PendingRespawns;
+		FTimerHandle Handle;
+		GetWorld()->GetTimerManager().SetTimer(Handle,
+			FTimerDelegate::CreateUObject(this, &UTagAgentSubsystem::RespawnRat, TWeakObjectPtr<APawn>(Rat)), FMath::Max(0.01f, Wait), false);
+	}
+
+	// 고양이 승리: 포획 횟수 제한을 넘었거나, 살아 있는 쥐도 부활 대기 중인 쥐도 없을 때
+	const int32 Limit = CVarCatchLimit.GetValueOnGameThread();
+	if (Limit > 0 && CatchCount >= Limit)
+	{
+		CatsWin(FString::Printf(TEXT("%d catches"), CatchCount));
+	}
+	else if (AliveRats.Num() == 0 && PendingRespawns == 0)
+	{
+		CatsWin(FString::Printf(TEXT("all %d rats are out"), NumRatsTotal));
 	}
 	return true;
+}
+
+void UTagAgentSubsystem::CatsWin(const FString& Reason)
+{
+	if (bCatsWon) return;
+	bCatsWon = true;
+	const FString Msg = FString::Printf(TEXT("[TagAI] Cats win! (%s) at %.2f s"), *Reason, GetElapsedSeconds());
+	UE_LOG(LogTemp, Log, TEXT("%s"), *Msg);
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Yellow, Msg);
+	OnCatsWin.Broadcast();
+}
+
+bool UTagAgentSubsystem::ChooseRespawnPoint(FVector& OutPos) const
+{
+	UWorld* World = GetWorld();
+	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	UTagGridSubsystem* Grid = World->GetSubsystem<UTagGridSubsystem>();
+	if (ExportZones.Num() == 0) return false;
+
+	// 고양이 칸들에서 여러 출발점 BFS 한 번 → 각 구역 바닥 칸까지 고양이가 걸어서 오는 거리
+	TArray<int32> CatDist;
+	TArray<FVector> CatPos;
+	if (Grid && Grid->GetNumWalkable() > 0)
+	{
+		TArray<int32> CatCells;
+		for (const TWeakObjectPtr<APawn>& C : Cats)
+		{
+			if (!C.IsValid()) continue;
+			CatPos.Add(C->GetActorLocation());
+			const int32 Cell = Grid->FindNearestWalkableCell(C->GetActorLocation());
+			if (Cell != INDEX_NONE) CatCells.Add(Cell);
+		}
+		Grid->BFSMulti(CatCells, CatDist);
+	}
+
+	const AActor* BestZone = nullptr;
+	float BestDist = -1.f;
+	for (const TWeakObjectPtr<AActor>& Z : ExportZones)
+	{
+		const AActor* Zone = Z.Get();
+		if (!Zone) continue;
+		const FBox Box = GetZoneBox(Zone);
+		const FVector Floor(Box.GetCenter().X, Box.GetCenter().Y, Box.Min.Z + 50.f);
+
+		float D = -1.f;
+		const int32 Cell = (Grid && CatDist.Num() == Grid->GetNumCells()) ? Grid->FindNearestWalkableCell(Floor) : INDEX_NONE;
+		if (Cell != INDEX_NONE && CatDist[Cell] >= 0)
+		{
+			D = CatDist[Cell] * Grid->GetCellSize();          // 걸어서 거리 (cm)
+		}
+		else
+		{
+			D = TNumericLimits<float>::Max();                    // 격자로 못 오면: 직선거리로 대신 (고양이가 없으면 아무 구역)
+			for (const FVector& P : CatPos) D = FMath::Min(D, FVector::Dist(Floor, P));
+		}
+		if (D > BestDist) { BestDist = D; BestZone = Zone; }
+	}
+	if (!BestZone) return false;
+
+	// 구역 안 랜덤 위치 (가장자리 40%는 빼고) → NavMesh 위로. 실패하면 구역 바닥 가운데
+	const FBox Box = GetZoneBox(BestZone);
+	const FVector Ext = Box.GetExtent() * 0.6f;
+	for (int32 Try = 0; Try < 8; ++Try)
+	{
+		const FVector P(Box.GetCenter().X + FMath::FRandRange(-Ext.X, Ext.X), Box.GetCenter().Y + FMath::FRandRange(-Ext.Y, Ext.Y), Box.Min.Z + 50.f);
+		FNavLocation NavLoc;
+		if (NavSys && NavSys->ProjectPointToNavigation(P, NavLoc, FVector(100.f, 100.f, 200.f)))
+		{
+			OutPos = NavLoc.Location;
+			return true;
+		}
+	}
+	OutPos = FVector(Box.GetCenter().X, Box.GetCenter().Y, Box.Min.Z);
+	return true;
+}
+
+void UTagAgentSubsystem::RespawnRat(TWeakObjectPtr<APawn> RatPtr)
+{
+	PendingRespawns = FMath::Max(0, PendingRespawns - 1);
+	APawn* Rat = RatPtr.Get();
+	if (!Rat || bCatsWon) return;
+
+	FVector Pos;
+	if (!ChooseRespawnPoint(Pos))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TagAI] %s could not respawn: no export zone"), *Rat->GetName());
+		return;
+	}
+
+	// 바닥 위로 캡슐 반높이만큼 올려서 순간이동
+	if (const ACharacter* Ch = Cast<ACharacter>(Rat))
+	{
+		Pos.Z += Ch->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + 5.f;
+	}
+	Rat->SetActorLocation(Pos, false, nullptr, ETeleportType::TeleportPhysics);
+	Rat->SetActorHiddenInGame(false);
+	Rat->SetActorEnableCollision(true);
+	if (ACharacter* Ch = Cast<ACharacter>(Rat)) Ch->GetCharacterMovement()->StopMovementImmediately();
+
+	CaughtRats.Remove(Rat);
+	AliveRats.AddUnique(Rat);
+
+	if (ATagRatAIController* AI = Cast<ATagRatAIController>(Rat->GetController()))
+	{
+		AI->OnRespawned();
+	}
+	else if (APlayerController* PC = Cast<APlayerController>(Rat->GetController()))
+	{
+		PC->SetIgnoreMoveInput(false);
+		PC->SetViewTargetWithBlend(Rat, 0.3f);
+	}
+
+	const FString Msg = FString::Printf(TEXT("[TagAI] %s respawned at %s at %.2f s"), *Rat->GetName(), *Pos.ToCompactString(), GetElapsedSeconds());
+	UE_LOG(LogTemp, Log, TEXT("%s"), *Msg);
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, Msg);
+	OnRatRespawned.Broadcast(Rat);
 }
 
 // ======================== 물건 ========================
@@ -183,7 +399,8 @@ void UTagAgentSubsystem::UpdateItems()
 	}
 
 	IConsoleVariable* DebugVar = IConsoleManager::Get().FindConsoleVariable(TEXT("Tag.Debug"));
-	if (DebugVar && DebugVar->GetInt() != 0) DrawExportZones(0.3f);   // 반출구역 = 하늘색 상자
+	const bool bDebug = DebugVar && DebugVar->GetInt() != 0;
+	if (bDebug) DrawExportZones(0.3f);   // 반출구역 = 하늘색 상자
 
 	// 1) 새로 생긴 물건 추가
 	for (TActorIterator<APickupItem> It(World); It; ++It)
@@ -213,6 +430,16 @@ void UTagAgentSubsystem::UpdateItems()
 		APawn* Holder = Cast<APawn>(Item->GetAttachParentActor());
 		E.Holder = Holder;
 		if (Holder) E.LastHolder = Holder;
+
+		UpdatePlaceholder(Item, Holder != nullptr);
+
+		// 물건 위에 "이름 w무게" 표시. 흰색 = 바닥, 노랑 = 누가 들고 있음, 하늘색 = 반출됨(어지러움에 들어감)
+		if (bDebug)
+		{
+			const FColor Color = Holder ? FColor::Yellow : (E.bExported ? FColor::Cyan : FColor::White);
+			DrawDebugString(World, Item->GetActorLocation() + FVector(0.f, 0.f, 70.f),
+				FString::Printf(TEXT("%s w%d"), *Item->ItemInfo.ItemName, Item->ItemInfo.Weight), nullptr, Color, 0.3f, false, 1.1f);
+		}
 
 		// 원래 위치: 처음 바닥에 놓인 상태로 본 위치 (생성 직후 위치를 옮기는 경우를 피하려고 다음 갱신 때 기록)
 		if (!E.bHomeSet && !Holder)
@@ -406,14 +633,6 @@ void UTagAgentSubsystem::FindExportZones()
 	}
 }
 
-static FBox GetZoneBox(const AActor* Zone)
-{
-	// 충돌 컴포넌트(Trigger Box의 상자) 기준. 충돌이 없는 액터면 전체 모양 기준
-	FVector Center, Extent;
-	Zone->GetActorBounds(true, Center, Extent);
-	if (Extent.IsNearlyZero()) Zone->GetActorBounds(false, Center, Extent);
-	return FBox(Center - Extent, Center + Extent);
-}
 
 bool UTagAgentSubsystem::IsInExportZone(const FVector& Pos) const
 {

@@ -12,6 +12,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FTagOnItemExported, APickupItem*,
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FTagOnItemRecovered, APickupItem*, Item, APawn*, Cat, int32, Score);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FTagOnMessinessChanged, float, Percent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FTagOnRatsWin);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FTagOnCatsWin);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FTagOnRatRespawned, APawn*, Rat);
 
 // 필드에 있는 물건 하나의 상태
 struct FTagItemEntry
@@ -37,6 +39,12 @@ struct FTagItemEntry
  *   누가 들고 있는지는 물건이 어느 캐릭터에 붙어 있는지로 판단함
  * - 반출구역: Actor Tag가 "ExportZone"인 액터 (Trigger Box 권장)
  *   들고 있지 않은 물건이 반출구역 안에 있으면 반출 완료 처리 (AI 쥐·플레이어 쥐 공통)
+ * - 포획과 부활 (기획서 포획 시 처리): 잡히면 숨기고(플레이어는 다른 쥐 관전) Tag.RespawnSeconds 뒤에
+ *   반출구역 중 고양이에게서 걸어서 가장 먼 구역 안에서 부활. Tag.RatLives(0 = 무한)만큼 부활하면 탈락.
+ *   Tag.CatchLimit(0 = 무한)번 잡거나 남은 쥐가 없으면 고양이 승리 이벤트
+ * - Tag.Debug 1이면 물건 위에 "이름 w무게" 표시 (흰 = 바닥, 노랑 = 들고 있음, 하늘색 = 반출됨)
+ * - 테스트용 임시 큐브 (Tag.ItemPlaceholder, 기본 1): 메시가 없는 물건에 무게별 크기의 큐브를 게임 중에만 붙임.
+ *   진짜 메시가 생기면 자동으로 떼어 냄. 팀원이 메시를 다 넣으면 이 기능은 아무것도 안 함
  * - 어지러움 (기획서 5.4): 물건 하나 = 가중치 / 전체 가중치 x 100
  *   반출되면 올라가고, 고양이가 원래 위치(Tag.RecoverRadius 안)에 내려놓아야 내려감.
  *   저장소에서 꺼내기만 하면 그대로. Tag.MessWinPercent(기본 80)%를 넘으면 쥐 팀 승리 이벤트
@@ -58,12 +66,21 @@ public:
 	void GetAliveRats(TArray<APawn*>& OutRats) const;
 	bool IsRatAlive(const APawn* Rat) const;
 
-	// 고양이가 쥐를 잡았을 때 호출. 그 쥐가 아직 살아 있었으면 true (같은 쥐를 두 번 잡지 않게)
+	// 고양이가 쥐를 잡았을 때 호출. 그 쥐가 아직 살아 있었으면 true (같은 쥐를 두 번 잡지 않게). 부활 예약도 여기서 함
 	bool ReportCaught(APawn* Cat, APawn* Rat);
+
+	UPROPERTY(BlueprintAssignable, Category = "TagAI")
+	FTagOnCatsWin OnCatsWin;
+
+	UPROPERTY(BlueprintAssignable, Category = "TagAI")
+	FTagOnRatRespawned OnRatRespawned;
+
+	UFUNCTION(BlueprintPure, Category = "TagAI")
+	int32 GetCatchCount() const { return CatchCount; }
 
 	float GetElapsedSeconds() const;
 
-	// 잡힌 쥐가 플레이어 캐릭터일 때: 들고 있던 물건을 떨어뜨리고, 조작을 막고 멈춤
+	// 잡힌 쥐가 플레이어 캐릭터일 때: 물건을 떨어뜨리고, 조작을 막고, 숨기고, 다른 쥐를 비춤(관전)
 	void HandlePlayerCaught(APawn* Rat);
 
 	// ---------- 물건 ----------
@@ -124,6 +141,9 @@ protected:
 
 private:
 	void RegisterPlayers();      // 0.5초마다 플레이어 캐릭터를 쥐로 등록
+	void RespawnRat(TWeakObjectPtr<APawn> Rat);
+	bool ChooseRespawnPoint(FVector& OutPos) const;   // 반출구역 중 고양이에게서 걸어서 가장 먼 구역 안 랜덤 위치
+	void CatsWin(const FString& Reason);
 	void UpdateItems();          // 0.25초마다 물건 목록·들고 있는 사람·반출 여부 갱신
 	void FindExportZones();
 	void ExportItem(FTagItemEntry& Entry);
@@ -138,6 +158,10 @@ private:
 	TArray<TWeakObjectPtr<APawn>> AliveRats;
 	int32 NumRatsTotal = 0;
 	int32 NumCaught = 0;
+	int32 CatchCount = 0;          // 전체 포획 횟수 (부활 포함해서 셈)
+	int32 PendingRespawns = 0;     // 부활 대기 중인 쥐 수
+	TMap<TWeakObjectPtr<APawn>, int32> Deaths;   // 쥐마다 잡힌 횟수
+	bool bCatsWon = false;
 	float StartTime = 0.f;
 
 	TArray<FTagItemEntry> Items;
