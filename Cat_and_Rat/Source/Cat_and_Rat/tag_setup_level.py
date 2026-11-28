@@ -23,6 +23,12 @@
     t.remove_spawn()              매니저와 슬롯 지우기
     t.add_zone_here('ExportZone_Garage')   뷰포트 카메라 바로 아래 바닥에 반출구역 추가하고 ini에 저장
     t.list_zones()                지금 맵에 있는 반출구역 목록
+
+  물건 메시 (데이터 테이블 /Game/ltk/DT_ItemSizeData 의 ItemMesh 칸)
+    t.list_items()                테이블의 물건 목록: 행 이름, 이름, 크기, 무게, 지금 메시
+    t.list_meshes('cup')          프로젝트의 Static Mesh 중 이름에 cup이 들어간 것 (빈칸이면 전부)
+    t.set_item_meshes({'Item_03': '/Game/.../SM_a_cup'})   행마다 메시를 넣고 테이블 저장
+    t.set_item_meshes(ITEM_MESHES)                          아래 ITEM_MESHES 목록대로 한꺼번에
     t.remove_test_items()         테스트 물건 지우기
 스크립트를 고친 뒤에는  import importlib; importlib.reload(t)
 
@@ -36,6 +42,8 @@
     ini에 [TagLayout]이 있으면 불러올 때 ini 값으로 바뀜.
     ini를 바꾼 뒤에는 에디터를 다시 켜야 C++(게임 실행)에 반영됨.
 """
+import csv
+import io
 import os
 import unreal
 
@@ -447,6 +455,81 @@ def capture_slots():
         global SLOTS
         SLOTS = [(round(a.get_actor_location().x), round(a.get_actor_location().y), round(a.get_actor_location().z)) for a in slots]
         save_layout()
+
+
+# ---------------- 물건 메시 ----------------
+ITEM_TABLE = '/Game/ltk/DT_ItemSizeData'
+# 행 이름 → 메시 경로. t.list_items()와 t.list_meshes()로 확인한 뒤 채움. t.set_item_meshes(ITEM_MESHES)
+ITEM_MESHES = {
+}
+
+
+def _item_csv():
+    dt = unreal.EditorAssetLibrary.load_asset(ITEM_TABLE)
+    if dt is None:
+        unreal.log_error('[TagSetup] Item table not found: %s' % ITEM_TABLE)
+        return None, None
+    text = unreal.DataTableFunctionLibrary.export_data_table_to_csv_string(dt)
+    rows = list(csv.reader(io.StringIO(text)))
+    return dt, rows
+
+
+def list_items():
+    """데이터 테이블 물건 목록을 로그에 출력"""
+    dt, rows = _item_csv()
+    if not rows:
+        return
+    head = rows[0]
+    col = {name: i for i, name in enumerate(head)}
+    unreal.log('[TagSetup] %d items in %s (columns: %s)' % (len(rows) - 1, ITEM_TABLE, ', '.join(head)))
+    for r in rows[1:]:
+        get = lambda k: r[col[k]] if k in col and col[k] < len(r) else ''
+        unreal.log('[TagSetup]   %-10s %-12s %-12s w%-3s mesh=%s' % (r[0], get('ItemName'), get('ItemSize'), get('Weight'), get('ItemMesh') or 'None'))
+
+
+def list_meshes(word=''):
+    """/Game 안의 Static Mesh 중 이름에 word가 들어간 것 (대소문자 무시)"""
+    ar = unreal.AssetRegistryHelpers.get_asset_registry()
+    flt = unreal.ARFilter(class_paths=[unreal.TopLevelAssetPath('/Script/Engine', 'StaticMesh')],
+                          package_paths=['/Game'], recursive_paths=True)
+    found = sorted(str(a.package_name) for a in ar.get_assets(flt))
+    hits = [p for p in found if word.lower() in p.rsplit('/', 1)[-1].lower()]
+    unreal.log('[TagSetup] %d static meshes match "%s" (of %d)' % (len(hits), word, len(found)))
+    for p in hits:
+        unreal.log('[TagSetup]   %s' % p)
+
+
+def set_item_meshes(mapping):
+    """{행 이름: 메시 경로} 대로 ItemMesh 칸을 채우고 테이블을 저장. 목록에 없는 행은 그대로 둠"""
+    dt, rows = _item_csv()
+    if not rows:
+        return
+    head = rows[0]
+    if 'ItemMesh' not in head:
+        unreal.log_error('[TagSetup] No ItemMesh column in %s' % ITEM_TABLE)
+        return
+    mc = head.index('ItemMesh')
+    done, missing = 0, []
+    for r in rows[1:]:
+        if r[0] not in mapping:
+            continue
+        path = mapping[r[0]]
+        if not unreal.EditorAssetLibrary.does_asset_exist(path):
+            missing.append('%s -> %s' % (r[0], path))
+            continue
+        while len(r) <= mc:
+            r.append('')
+        name = path.rsplit('/', 1)[-1]
+        r[mc] = '%s.%s' % (path, name)
+        done += 1
+    out = io.StringIO()
+    csv.writer(out, lineterminator='\n').writerows(rows)
+    with unreal.ScopedEditorTransaction('Tag set item meshes'):
+        ok = unreal.DataTableFunctionLibrary.fill_data_table_from_csv_string(dt, out.getvalue())
+    if ok:
+        unreal.EditorAssetLibrary.save_loaded_asset(dt)
+    unreal.log('[TagSetup] Set %d item meshes (%s). Missing assets: %s'
+               % (done, 'saved' if ok else 'FAILED to write table', ', '.join(missing) or 'none'))
 
 
 def remove_spawn():
