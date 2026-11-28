@@ -699,13 +699,16 @@ void UTagAgentSubsystem::UpdateItems()
 			E.ReservedByCat = nullptr;
 		}
 
-		// 반출: 들고 있지 않은 물건이 반출구역 안에 있으면 완료
-		if (!E.bExported && !Holder && IsInExportZone(Item->GetActorLocation()))
+		// 반출: 쥐가 한 번이라도 들었던 물건이 반출구역 안에 놓이면 완료.
+		// 처음부터 반출구역 안(또는 바로 옆)에 생긴 물건은 아무도 안 옮겼으니 반출이 아님
+		// (이걸 안 막으면 '반출 → 원래 자리라서 회수 → 반출'이 매 순간 반복되어 로그가 도배됨)
+		const bool bInZone = IsInExportZone(Item->GetActorLocation());
+		if (!E.bExported && !Holder && bInZone && E.LastHolder.IsValid() && !Cats.Contains(E.LastHolder))
 		{
 			ExportItem(E);
 		}
-		// 회수: 반출됐던 물건이 원래 위치 근처에 놓여 있으면 완료 (들고 있는 동안은 아님)
-		else if (E.bExported && !Holder && E.bHomeSet)
+		// 회수: 반출됐던 물건이 원래 위치 근처에 놓여 있으면 완료 (들고 있는 동안, 반출구역 안은 아님)
+		else if (E.bExported && !Holder && E.bHomeSet && !bInZone)
 		{
 			const FVector P = Item->GetActorLocation();
 			const float R = CVarRecoverRadius.GetValueOnGameThread();
